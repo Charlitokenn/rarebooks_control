@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+
+      # Keep the ruff version in sync with .pre-commit-config.yaml.
+      - name: Check Python style
+        run: |
+          uvx ruff@0.14.10 check rarebooks_control
+          uvx ruff@0.14.10 format --check rarebooks_control
+
+  integration:
+    name: Frappe version-16 / mariadb
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: control-test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=10
+      redis-cache:
+        image: redis:7
+        ports:
+          - 13000:6379
+      redis-queue:
+        image: redis:7
+        ports:
+          - 11000:6379
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcups2-dev libmariadb-dev mariadb-client redis-server
+          npm install --global yarn@1.22.22
+          uv tool install frappe-bench
+
+      - name: Create version-16 bench
+        run: |
+          bench init "$RUNNER_TEMP/control-bench" --frappe-branch version-16 \
+            --python "$(command -v python)" --skip-assets --no-backups
+
+      - name: Install the control app
+        working-directory: ${{ runner.temp }}/control-bench
+        run: |
+          bench set-config -g developer_mode 1
+          bench set-config -g redis_cache redis://127.0.0.1:13000
+          bench set-config -g redis_queue redis://127.0.0.1:11000
+          bench set-config -g redis_socketio redis://127.0.0.1:13000
+          bench get-app --soft-link --skip-assets "$GITHUB_WORKSPACE"
+          bench setup requirements --dev
+
+      - name: Create and migrate test site
+        working-directory: ${{ runner.temp }}/control-bench
+        run: |
+          bench new-site control-test.localhost --db-type mariadb --admin-password admin \
+            --db-host 127.0.0.1 --db-port 3306 --db-root-username root --db-root-password control-test
+          bench --site control-test.localhost install-app rarebooks_control
+          bench --site control-test.localhost set-config allow_tests 1 --parse
+          bench --site control-test.localhost migrate
+
+      - name: Run tests
+        working-directory: ${{ runner.temp }}/control-bench
+        run: bench --site control-test.localhost run-tests --app rarebooks_control
