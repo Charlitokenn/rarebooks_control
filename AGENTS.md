@@ -46,7 +46,9 @@ Specs are referenced by number in commits, comments and tests (for example spec 
 
 ## Agent skills
 
-<!-- Filled after the skill search; see the /audit report. -->
+No Agent Skills found for this stack yet (searched November 2026).
+
+MCP servers: paypal/paypal-mcp-server (recommended), Sena-IT/frappe-mcp-server (recommended, community)
 
 ## Context files
 
