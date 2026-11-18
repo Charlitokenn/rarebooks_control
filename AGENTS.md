@@ -11,7 +11,7 @@ The RareBooks billing control site: a Frappe app holding the hosted site registr
 
 ## Build approach
 
-<TBD, set by /scope>
+Tracer Bullet: each slice is built end to end and works before the next starts. Source: the scope file in the sibling `rarebooks-web` repo (`docs/scope/scope.md`, feature 8).
 
 ## Commands
 
@@ -43,6 +43,10 @@ Specs are referenced by number in commits, comments and tests (for example spec 
 - Comments explain why and cite the spec and acceptance criterion they come from (`spec 0008 AC-1`). Tests mark what they prove with `# covers: AC-n`.
 - Money is a `Decimal` rounded with `ROUND_HALF_UP` to the currency's smallest unit (whole TZS, USD cents), never a float.
 - Schema changes go through `bench migrate`; data fixes go in `rarebooks_control/patches/` and are listed in `patches.txt`.
+- Signed endpoints (`api.py`, `webhooks.py`) answer through `signing.signed_response`, never `frappe.throw` or Frappe's `message` wrapper, so the bytes signed are the bytes sent (spec 0008 AC-5).
+- `tests/signing_vectors.json` must stay byte for byte identical to `frappe_books/tests/signing_vectors.json` in `rarebooks-web`. Change both together.
+- Every payment change goes through `billing.confirm_*`: lock the site row, ask the provider, then write. A webhook body alone never changes billing (spec 0008 AC-7).
+- Only `providers/clickpesa.py` talks to ClickPesa; tests patch its functions. Its credentials come from site config (`clickpesa_client_id`, `clickpesa_api_key`, `clickpesa_checksum_key`) and are never logged.
 
 ## Agent skills
 
