@@ -7,6 +7,7 @@ Each one reads the raw body, checks the signature and `issued_at` first, and ans
 import hashlib
 import secrets
 from datetime import timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from urllib.parse import urlsplit
 
 import frappe
@@ -15,6 +16,7 @@ from werkzeug.wrappers import Response
 
 from rarebooks_control import billing, signing
 from rarebooks_control.providers.clickpesa import ClickPesaError
+from rarebooks_control.rarebooks_control.doctype.books_plan.books_plan import CURRENCY_STEP
 from rarebooks_control.state import site_state
 
 SITE = "Books Hosted Site"
@@ -125,12 +127,19 @@ def offered_plans(row) -> list[dict]:
 		{
 			"provider": plan.provider,
 			"billing_period": plan.billing_period,
-			"amount": float(plan.amount),
+			"amount": json_amount(plan.amount, plan.currency),
 			"currency": plan.currency,
 			"label": plan.label,
 		}
 		for plan in plans.values()
 	]
+
+
+def json_amount(amount, currency: str) -> int | float:
+	"""The plan amount as a JSON number, from the Decimal rounded to the currency's unit: the customer site
+	formats it as a number. Whole TZS stay integers; USD keeps its two decimals exactly."""
+	value = Decimal(str(amount)).quantize(CURRENCY_STEP[currency], rounding=ROUND_HALF_UP)
+	return int(value) if value == value.to_integral_value() else float(value)
 
 
 def plan_for(row, provider: str, period: str):

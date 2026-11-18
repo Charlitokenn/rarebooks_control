@@ -39,21 +39,25 @@ class UnitTestClickPesaDates(UnitTestCase):
 		)
 
 	def test_an_early_renewal_extends_from_the_old_end(self):
+		# covers: AC-8
 		self.assertEqual(
 			clickpesa_paid_until(date(2027, 12, 8), datetime(2027, 11, 20), date(2026, 12, 8), None),
 			date(2028, 12, 8),
 		)
 
 	def test_a_renewal_after_a_lapse_starts_on_the_payment_day(self):
+		# covers: AC-8
 		self.assertEqual(
 			clickpesa_paid_until(date(2027, 12, 8), datetime(2028, 1, 7, 12), date(2026, 12, 8), None),
 			date(2029, 1, 6),
 		)
 
 	def test_a_start_on_29_february_ends_on_27_february(self):
+		# covers: AC-8
 		self.assertEqual(clickpesa_paid_until(None, datetime(2028, 2, 29, 12), None, None), date(2029, 2, 27))
 
 	def test_dar_es_salaam_near_midnight_is_the_next_day(self):
+		# covers: AC-8
 		# 22:30 UTC is 01:30 the next day in Dar es Salaam (UTC+3).
 		paid_on = datetime(2027, 3, 1, 22, 30)
 		self.assertEqual(clickpesa_paid_until(None, paid_on, None, "Africa/Dar_es_Salaam"), date(2028, 3, 1))
@@ -254,6 +258,7 @@ class IntegrationTestPush(IntegrationTestCase):
 		queue_push.assert_called_once_with(row.name)
 
 	def test_a_removed_site_is_never_pushed(self):
+		# covers: AC-13
 		row = make_site("removed.push.example.com", status="Removed", state_version=1)
 		with patch("rarebooks_control.push.requests.post") as post:
 			push.push_site(row.name)

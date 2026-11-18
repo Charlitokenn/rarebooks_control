@@ -117,6 +117,7 @@ class IntegrationTestRegisterSite(IntegrationTestCase):
 				self.assertFalse(frappe.db.exists(SITE, body["site"]))
 
 	def test_bad_url_or_email_gets_400(self):
+		# covers: AC-1
 		for values in ({"site_url": "http://plain.rarebooks.app"}, {"owner_email": "not-an-email"}):
 			with self.subTest(**values), runner_config(BENCH):
 				response = call(
@@ -175,6 +176,8 @@ class IntegrationTestGetState(IntegrationTestCase):
 			sorted((plan["provider"], plan["label"], plan["amount"]) for plan in data["plans"]),
 			[("ClickPesa", "Yearly", 120000), ("PayPal", "Monthly", 9)],
 		)
+		self.assertEqual(api.json_amount(9.5, "USD"), 9.5)
+		self.assertIsInstance(api.json_amount(120000.0, "TZS"), int)
 
 	def test_stores_the_site_facts(self):
 		# covers: AC-2, AC-21
@@ -309,6 +312,7 @@ class IntegrationTestCreateCheckout(IntegrationTestCase):
 				self.assertEqual(response.status_code, 400)
 
 	def test_a_clickpesa_failure_answers_a_signed_502_and_keeps_no_checkout(self, create_link):
+		# covers: AC-5 (every signed answer goes through signed_response)
 		create_link.side_effect = ClickPesaError("timeout")
 		row = make_site("down.rarebooks.app")
 		secret = row.get_password("control_secret")
