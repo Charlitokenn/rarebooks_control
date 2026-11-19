@@ -1,8 +1,9 @@
 """The push of a site's full state to its `receive_state` (spec 0008 AC-13).
 
 One job per site (`push:<site>`, deduplicated). The job reads the row and stamps `issued_at` while holding
-the row lock, so a push never carries older data with a newer `issued_at`. Milestone 1 makes one attempt
-and records the outcome; the retry sweep and alerts come with the push queue (build plan task 12).
+the row lock, so a push never carries older data with a newer `issued_at`. A failed push is retried 1, 5,
+15 and 60 minutes later, then hourly, by the per minute sweep. The operator hears once when a site has been
+failing for 6 hours, and at once when a site answers 400.
 """
 
 import json
@@ -10,7 +11,9 @@ from datetime import timedelta
 
 import frappe
 import requests
+from frappe import _
 
+from rarebooks_control.alerts import send_ops
 from rarebooks_control.signing import SIGNATURE_HEADER, dumps, issued_now, sign, utc_now
 from rarebooks_control.state import site_state
 
@@ -20,6 +23,8 @@ GOOD_RESULTS = ("applied", "ignored")
 # Minutes after each failure: 1, 5, 15, 60, then every hour.
 RETRY_MINUTES = (1, 5, 15, 60)
 ERROR_LENGTH = 500
+FAILING_ALERT_AFTER = timedelta(hours=6)
+BAD_REQUEST_ERROR = "push answered HTTP 400"
 
 
 def mark_changed(row):
@@ -105,13 +110,34 @@ def success_values(row, version: int) -> dict:
 def failure_values(row, error: str | None) -> dict:
 	now = utc_now()
 	attempts = (row.push_attempts or 0) + 1
-	return {
+	failing_since = row.failing_since or now
+	error = (error or "push failed")[:ERROR_LENGTH]
+	values = {
 		"push_status": "Failing",
 		"push_attempts": attempts,
-		"failing_since": row.failing_since or now,
+		"failing_since": failing_since,
 		"next_push_on": now + timedelta(minutes=retry_minutes(attempts)),
-		"last_push_error": (error or "push failed")[:ERROR_LENGTH],
+		"last_push_error": error,
 	}
+	if error == BAD_REQUEST_ERROR and row.last_push_error != BAD_REQUEST_ERROR:
+		# The site refuses what we send, so retrying won't fix it: say so at once, once per change to 400.
+		alert(row, _("Site {0} refuses the billing push").format(row.name), error)
+	if not row.failing_alerted and now - failing_since >= FAILING_ALERT_AFTER:
+		alert(row, _("Billing push to {0} has failed for 6 hours").format(row.name), error)
+		values["failing_alerted"] = 1
+	return values
+
+
+def alert(row, subject: str, error: str):
+	send_ops(
+		subject,
+		[
+			_(
+				"The site has not had its billing state since {0} UTC. Pushes keep retrying every hour."
+			).format(row.failing_since or utc_now()),
+			_("Last error: {0}. Attempts so far: {1}.").format(error, (row.push_attempts or 0) + 1),
+		],
+	)
 
 
 def retry_minutes(attempts: int) -> int:

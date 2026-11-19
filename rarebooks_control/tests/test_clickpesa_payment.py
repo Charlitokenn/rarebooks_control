@@ -90,7 +90,7 @@ class IntegrationTestClickPesaPayment(IntegrationTestCase):
 		return response, answer(response), sendmail
 
 	def test_a_confirmed_payment_buys_a_year_and_pushes_it(self, queue_push, create_link):
-		# covers: AC-7, AC-8, AC-13
+		# covers: AC-7, AC-8, AC-13, AC-19
 		row, checkout = self.checkout("paid.rarebooks.app")
 		reference = checkout.order_reference
 		response, data, sendmail = self.deliver(webhook_body(reference), [paid_item(reference)])
@@ -111,7 +111,9 @@ class IntegrationTestClickPesaPayment(IntegrationTestCase):
 		self.assertEqual(
 			(event.outcome, event.site, str(event.paid_until_after)), ("Applied", row.name, "2027-12-08")
 		)
-		sendmail.assert_not_called()
+		# No ops alert; the only email is the owner's receipt (AC-19).
+		sendmail.assert_called_once()
+		self.assertEqual(sendmail.call_args.kwargs["recipients"], ["owner@example.com"])
 
 		stub = CustomerStub(row.get_password("control_secret"))
 		with patch("rarebooks_control.push.requests.post", stub):

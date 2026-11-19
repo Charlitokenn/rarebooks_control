@@ -5,6 +5,7 @@ checkout, the event and the site in one transaction. Webhooks, the return page a
 disagree, and nothing changes from a webhook body alone.
 """
 
+import json
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
@@ -15,6 +16,7 @@ from frappe.utils import get_datetime, get_url, getdate, now_datetime
 from werkzeug.utils import redirect
 from werkzeug.wrappers import Response
 
+from rarebooks_control.alerts import send_ops
 from rarebooks_control.providers import clickpesa, paypal
 from rarebooks_control.push import mark_changed
 from rarebooks_control.signing import utc_now
@@ -36,6 +38,8 @@ COOKIE = "books_checkout"
 COOKIE_PATH = f"/api/method/{RETURNED}"
 TOKEN_LIFETIME = timedelta(hours=24)
 GONE = 410
+# Languages a receipt is written in; any other gets English (AC-19).
+RECEIPT_LANGUAGES = ("en", "sw")
 BRAND_NAME = "RareBooks"
 # PayPal statuses that say who pays and whether it renews; any other (APPROVAL_PENDING, APPROVED) waits.
 PAYPAL_SETTLED_STATUSES = ("ACTIVE", "CANCELLED", "SUSPENDED", "EXPIRED")
@@ -179,7 +183,7 @@ def confirm_clickpesa(checkout_name: str, event_name: str) -> str:
 		)
 		return finish(event, "Mismatch", row)
 
-	apply_clickpesa(row, checkout)
+	apply_clickpesa(row, checkout, first)
 	if extras:
 		alert_ops(
 			_("A second payment for order {0}").format(checkout.order_reference),
@@ -190,7 +194,7 @@ def confirm_clickpesa(checkout_name: str, event_name: str) -> str:
 	return finish(event, "Applied", row)
 
 
-def apply_clickpesa(row, checkout):
+def apply_clickpesa(row, checkout, item: dict):
 	"""One year from the AC-8 start. A provider never moves `paid_until` earlier (AC-10)."""
 	now = utc_now()
 	checkout.status = "Paid"
@@ -214,6 +218,10 @@ def apply_clickpesa(row, checkout):
 	if site_state(row) != before:
 		mark_changed(row)
 	row.save(ignore_permissions=True)
+	if site_state(row)["paid_until"] != before["paid_until"]:
+		send_receipt(
+			row, checkout.plan, decimal_amount(item.get("collectedAmount")), item.get("collectedCurrency")
+		)
 
 
 def paid_items(items: list[dict]) -> list[dict]:
@@ -295,23 +303,6 @@ def _checkout_lines(checkout) -> list[str]:
 			checkout.currency,
 		)
 	]
-
-
-def send_ops(subject: str, lines: list[str]):
-	"""Send at once. A failed email is logged, never raised, so it can't undo the payment record it is about."""
-	recipient = frappe.conf.get("books_ops_email")
-	if not recipient:
-		frappe.log_error(f"Billing alert with no books_ops_email set: {subject}", "\n".join(lines))
-		return
-	try:
-		frappe.sendmail(
-			recipients=[recipient],
-			subject=subject,
-			message="<br>".join(frappe.utils.escape_html(line) for line in lines),
-			now=True,
-		)
-	except Exception:
-		frappe.log_error(f"Billing alert could not be sent: {subject}")
 
 
 def decimal_amount(value) -> Decimal | None:
@@ -498,8 +489,171 @@ def apply_paypal(row, subscription: dict, plan, payment: dict | None, checkout) 
 	if changed:
 		mark_changed(row)
 	row.save(ignore_permissions=True)
+	if payment and site_state(row)["paid_until"] != before["paid_until"]:
+		send_receipt(row, plan.name, payment["amount"], payment["currency"])
 	return changed
 
 
 def _created(subscription: dict):
 	return parse_utc(subscription.get("create_time")) or utc_now()
+
+
+def send_receipt(row, plan: str, amount, currency):
+	"""One receipt to the owner for the payment that moved `paid_until`, in the site's language (AC-19).
+
+	Called inside the apply, so the Email Queue row commits with the payment: a reprocessed event finds
+	`paid_until` already moved and sends nothing.
+	"""
+	if not row.owner_email:
+		return
+	lang = receipt_language(row.language)
+	plan_doc = frappe.db.get_value("Books Plan", plan, ["label", "billing_period"], as_dict=True) or {}
+	company = row.company_name or row.site
+	lines = [
+		_("Thank you. We received your payment for {0}.", lang=lang).format(company),
+		_("Plan: {0}", lang=lang).format(plan_doc.get("label") or ""),
+		_("Amount: {0} {1}", lang=lang).format(amount, currency),
+		_("Billing period: {0}", lang=lang).format(period_label(row.billing_period, lang)),
+		_("Paid until: {0}", lang=lang).format(getdate(row.paid_until).isoformat()),
+		_("Reference: {0}", lang=lang).format(row.provider_reference),
+		_("This receipt is not a tax invoice.", lang=lang),
+	]
+	try:
+		frappe.sendmail(
+			recipients=[row.owner_email],
+			subject=_("Payment received for {0}", lang=lang).format(company),
+			message="<br>".join(frappe.utils.escape_html(line) for line in lines),
+			reference_doctype=SITE,
+			reference_name=row.name,
+		)
+	except Exception:
+		frappe.log_error(f"Billing receipt could not be queued for {row.name}")
+
+
+def period_label(period, lang: str) -> str:
+	"""Monthly or Yearly, translated with a context so the words elsewhere in desk keep their own."""
+	if period == "Monthly":
+		return _("Monthly", lang=lang, context="billing period")
+	if period == "Yearly":
+		return _("Yearly", lang=lang, context="billing period")
+	return period or ""
+
+
+def receipt_language(language) -> str:
+	"""`sw`, `sw-TZ` and `sw_TZ` read as Swahili; anything else, or nothing, as English."""
+	base = (language or "").replace("_", "-").split("-")[0].lower()
+	return base if base in RECEIPT_LANGUAGES else "en"
+
+
+def store_event(event_id: str, provider: str, event_type: str, raw: bytes):
+	"""Store the delivery with no outcome yet, and commit, so a later failure still leaves it to retry."""
+	event = frappe.get_doc(
+		{
+			"doctype": EVENT,
+			"event_id": event_id,
+			"provider": provider,
+			"event_type": event_type[:140],
+			"received_on": utc_now(),
+			"raw_payload": raw.decode(errors="replace"),
+		}
+	).insert(ignore_permissions=True)
+	frappe.db.commit()
+	return event
+
+
+def open_event(event_id: str, provider: str, event_type: str, payload) -> str | None:
+	"""The name of the stored event to process for a confirmation, or None when it was already processed
+	or is being processed right now. Confirmations dedupe on `event_id` as webhooks do (AC-7, AC-16)."""
+	event = frappe.db.get_value(EVENT, {"event_id": event_id}, ["name", "outcome"], as_dict=True)
+	if event:
+		return None if event.outcome else event.name
+	try:
+		return store_event(event_id, provider, event_type, json.dumps(payload, default=str).encode()).name
+	except frappe.DuplicateEntryError:
+		frappe.db.rollback()
+		return None
+
+
+def check_clickpesa(checkout_name: str) -> str | None:
+	"""Ask ClickPesa about one checkout and apply a payment it finds, as the webhook would (AC-12, AC-16).
+
+	Returns the outcome, or None when there is nothing new. Raises `ClickPesaError` like the webhook path.
+	"""
+	order = frappe.db.get_value(CHECKOUT, checkout_name, "order_reference")
+	if not order:
+		return None
+	paid = paid_items(clickpesa.payments(order))
+	if not paid:
+		return None
+	event = open_event(f"confirm:{checkout_name}:{paid[0].get('status')}", "ClickPesa", "confirm", paid)
+	return confirm_clickpesa(checkout_name, event) if event else None
+
+
+def check_paypal(subscription_id: str) -> str | None:
+	"""Ask PayPal about one subscription and apply what it says, as the webhook would (AC-12, AC-16).
+
+	A subscription still waiting for approval has nothing to apply. Raises `PayPalError` like the webhook.
+	"""
+	subscription = paypal.get_subscription(subscription_id)
+	if not subscription or subscription.get("status") not in PAYPAL_SETTLED_STATUSES:
+		return None
+	next_billing = (subscription.get("billing_info") or {}).get("next_billing_time")
+	event_id = f"confirm:{subscription_id}:{subscription['status']}:{next_billing}"
+	event = open_event(event_id, "PayPal", "confirm", subscription)
+	return confirm_paypal(subscription_id, event) if event else None
+
+
+@frappe.whitelist(allow_guest=True, methods=["GET"])
+@rate_limit(limit=30, seconds=60)
+def returned(subscription_id: str | None = None) -> Response:
+	"""Where the payer lands after the provider: confirm with it now, then back to the books (AC-12).
+
+	PayPal names the subscription in the query; ClickPesa's return carries nothing we rely on, so the `go`
+	cookie finds the checkout. A provider that can't be reached only delays the unlock: the webhook and
+	the reconcile jobs apply it later, so the payer still goes back.
+	"""
+	from rarebooks_control.api import token_hash
+
+	fields = ["name", "provider", "return_url", "paypal_subscription_id"]
+	checkout = None
+	if isinstance(subscription_id, str) and subscription_id:
+		checkout = frappe.db.get_value(
+			CHECKOUT, {"paypal_subscription_id": subscription_id}, fields, as_dict=True
+		)
+	token = frappe.request.cookies.get(COOKIE) if frappe.request else None
+	if not checkout and token:
+		checkout = frappe.db.get_value(CHECKOUT, {"token_hash": token_hash(token)}, fields, as_dict=True)
+	if not checkout:
+		return page(_("You can close this page and go back to your books."), 200)
+
+	try:
+		if checkout.provider == "PayPal":
+			check_paypal(checkout.paypal_subscription_id)
+		else:
+			check_clickpesa(checkout.name)
+		frappe.db.commit()
+	except (clickpesa.ClickPesaError, paypal.PayPalError) as error:
+		frappe.db.rollback()
+		frappe.log_error("Billing: the return page could not confirm with the provider", str(error))
+	return redirect(checkout.return_url, code=302)
+
+
+def billing_state(site: str) -> dict:
+	"""What spec 0007's drop and cancel checks need to know about a site's billing.
+
+	`checkout_in_last_24h` is a checkout made in the last 24 hours that is still `Created`, or one that
+	became `Paid` in the last 24 hours.
+	"""
+	row = frappe.db.get_value(SITE, site, ["paid_until", "exempt", "auto_renews"], as_dict=True)
+	if not row:
+		return {"paid_until": None, "exempt": 0, "auto_renews": 0, "checkout_in_last_24h": False}
+	since = utc_now() - TOKEN_LIFETIME
+	recent = frappe.db.exists(
+		CHECKOUT, {"site": site, "status": "Created", "creation": (">", now_datetime() - TOKEN_LIFETIME)}
+	) or frappe.db.exists(CHECKOUT, {"site": site, "status": "Paid", "paid_on": (">", since)})
+	return {
+		"paid_until": getdate(row.paid_until) if row.paid_until else None,
+		"exempt": int(row.exempt or 0),
+		"auto_renews": int(row.auto_renews or 0),
+		"checkout_in_last_24h": bool(recent),
+	}

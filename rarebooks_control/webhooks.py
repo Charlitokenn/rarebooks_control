@@ -9,7 +9,6 @@ from werkzeug.wrappers import Response
 from rarebooks_control import billing, signing
 from rarebooks_control.providers import clickpesa as clickpesa_api
 from rarebooks_control.providers import paypal as paypal_api
-from rarebooks_control.signing import utc_now
 
 EVENT = "Books Payment Event"
 UNAUTHORIZED, BAD_REQUEST, UNAVAILABLE = 401, 400, 503
@@ -44,7 +43,7 @@ def clickpesa() -> Response:
 		return answer("duplicate")
 	if not event:
 		try:
-			event = store_event(event_id, "ClickPesa", event_type, raw)
+			event = billing.store_event(event_id, "ClickPesa", event_type, raw)
 		except frappe.DuplicateEntryError:
 			# The same delivery is being handled right now; ask ClickPesa to send it again later.
 			frappe.db.rollback()
@@ -93,7 +92,7 @@ def paypal() -> Response:
 		return answer("duplicate")
 	if not event:
 		try:
-			event = store_event(event_id, "PayPal", event_type, raw)
+			event = billing.store_event(event_id, "PayPal", event_type, raw)
 		except frappe.DuplicateEntryError:
 			frappe.db.rollback()
 			return answer("busy", UNAVAILABLE)
@@ -146,22 +145,6 @@ def paypal_refund(event, resource: dict) -> str:
 
 def _site_of(value) -> str | None:
 	return value if isinstance(value, str) and frappe.db.exists("Books Hosted Site", value) else None
-
-
-def store_event(event_id: str, provider: str, event_type: str, raw: bytes):
-	"""Store the delivery with no outcome yet, and commit, so a later failure still leaves it to retry."""
-	event = frappe.get_doc(
-		{
-			"doctype": EVENT,
-			"event_id": event_id,
-			"provider": provider,
-			"event_type": event_type[:140],
-			"received_on": utc_now(),
-			"raw_payload": raw.decode(errors="replace"),
-		}
-	).insert(ignore_permissions=True)
-	frappe.db.commit()
-	return event
 
 
 def answer(result: str, status: int = 200) -> Response:

@@ -15,4 +15,8 @@ scheduler_events = {
 		# Spec 0008 AC-13: pushes that are pending, or failing and due.
 		"* * * * *": ["rarebooks_control.push.sweep"],
 	},
+	# Spec 0008 AC-10, AC-16, AC-18: checkout expiry and the ClickPesa reconcile hourly; the PayPal
+	# reconcile, the 90 day payload purge and the payment failure digest daily.
+	"hourly": ["rarebooks_control.reconcile.hourly"],
+	"daily": ["rarebooks_control.reconcile.daily"],
 }
