@@ -42,7 +42,10 @@ def is_valid_checksum(payload: dict) -> bool:
 		return False
 	# Compare bytes: compare_digest raises TypeError on a str holding non ASCII characters, and the body is
 	# the sender's, so a forged checksum must answer 401, not 500 (spec 0008 AC-7).
-	return hmac.compare_digest(checksum(payload, key).encode(), received.encode("utf-8", "surrogatepass"))
+	try:
+		return hmac.compare_digest(checksum(payload, key).encode(), received.encode("utf-8", "surrogatepass"))
+	except UnicodeEncodeError:
+		return False
 
 
 def create_checkout_link(order_reference: str, amount, currency: str, customer_email: str | None) -> str:

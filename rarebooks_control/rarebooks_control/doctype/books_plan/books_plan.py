@@ -58,13 +58,15 @@ class BooksPlan(Document):
 
 	def validate_unique(self):
 		"""One plan per provider and period, plus at most one test plan beside it."""
+		# Serialize validation and save on a row that exists even before the first plan.
+		frappe.db.get_value("DocType", "Books Plan", "name", for_update=True)
 		filters = {
 			"provider": self.provider,
 			"billing_period": self.billing_period,
 			"test_only": self.test_only,
 			"name": ("!=", self.name),
 		}
-		if frappe.db.exists("Books Plan", filters):
+		if frappe.db.get_value("Books Plan", filters, "name", for_update=True):
 			kind = _("test plan") if self.test_only else _("plan")
 			frappe.throw(
 				_("There is already a {0} for {1} {2}.").format(kind, self.provider, _(self.billing_period))

@@ -52,3 +52,12 @@ class BooksHostedSite(Document):
 			frappe.throw(_("A hosted site needs its control secret."))
 		if not (self.site_url or "").startswith("https://"):
 			frappe.throw(_("The site URL must start with https://"))
+
+	def before_save(self):
+		from rarebooks_control.push import mark_changed
+		from rarebooks_control.state import site_state
+
+		before = self.get_doc_before_save()
+		if before and site_state(self) != site_state(before):
+			self.state_version = before.state_version
+			mark_changed(self)

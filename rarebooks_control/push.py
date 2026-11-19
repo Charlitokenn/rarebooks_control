@@ -11,6 +11,7 @@ from datetime import timedelta
 import frappe
 import requests
 
+from rarebooks_control.destinations import post
 from rarebooks_control.signing import SIGNATURE_HEADER, dumps, issued_now, sign, utc_now
 from rarebooks_control.state import site_state
 
@@ -63,13 +64,14 @@ def send(row, body: bytes) -> tuple[str | None, str | None]:
 	"""The customer's `result`, or None and a short reason. A reason never holds a secret or the body."""
 	secret = row.get_password("control_secret")
 	try:
-		response = requests.post(
+		response = post(
 			f"{row.site_url.rstrip('/')}/api/method/{RECEIVE_STATE}",
 			data=body,
 			headers={"Content-Type": "application/json", SIGNATURE_HEADER: sign(body, secret)},
 			timeout=TIMEOUT_SECONDS,
+			allow_redirects=False,
 		)
-	except requests.RequestException as error:
+	except (requests.RequestException, ValueError) as error:
 		return None, f"push failed: {type(error).__name__}"
 	if response.status_code != 200:
 		return None, f"push answered HTTP {response.status_code}"

@@ -3,7 +3,6 @@ deduplicated, and then `billing.confirm_*` asks the provider for the truth."""
 
 import frappe
 from frappe import _
-from frappe.rate_limiter import rate_limit
 from werkzeug.wrappers import Response
 
 from rarebooks_control import billing, signing
@@ -15,8 +14,9 @@ UNAUTHORIZED, BAD_REQUEST, UNAVAILABLE = 401, 400, 503
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
-@rate_limit(limit=300, seconds=60)
 def clickpesa() -> Response:
+	if signing.over_limit("clickpesa", frappe.local.request_ip, 300):
+		return answer("rate_limited", 429)
 	raw, body = signing.read_body()
 	if body is None or not clickpesa_api.is_valid_checksum(body):
 		return answer("unauthorized", UNAUTHORIZED)

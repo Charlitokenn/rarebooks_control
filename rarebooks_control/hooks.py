@@ -13,6 +13,6 @@ export_python_type_annotations = True
 scheduler_events = {
 	"cron": {
 		# Spec 0008 AC-13: pushes that are pending, or failing and due.
-		"* * * * *": ["rarebooks_control.push.sweep"],
+		"* * * * *": ["rarebooks_control.push.sweep", "rarebooks_control.billing.reconcile_allocations"],
 	},
 }

@@ -2,7 +2,7 @@
 and the `go` link (AC-6)."""
 
 import hashlib
-from datetime import timedelta
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 import frappe
@@ -62,6 +62,12 @@ def checkout_body(site, **values):
 
 class IntegrationTestRegisterSite(IntegrationTestCase):
 	def setUp(self):
+		dns = patch(
+			"rarebooks_control.destinations.socket.getaddrinfo",
+			return_value=[(2, 1, 6, "", ("8.8.8.8", 443))],
+		)
+		dns.start()
+		self.addCleanup(dns.stop)
 		reset_billing()
 		make_bench()
 
@@ -216,10 +222,14 @@ class IntegrationTestGetState(IntegrationTestCase):
 		# covers: AC-22 (per site, not per IP: every site calls from the hosting server's one IP)
 		rows = [make_site(f"rl{number}.rarebooks.app") for number in range(2)]
 		secrets = [row.get_password("control_secret") for row in rows]
-		for _ in range(30):
-			self.assertEqual(call(api.get_state, site_body(rows[0].name), secrets[0]).status_code, 200)
-		self.assertEqual(call(api.get_state, site_body(rows[0].name), secrets[0]).status_code, 429)
-		self.assertEqual(call(api.get_state, site_body(rows[1].name), secrets[1]).status_code, 200)
+		with (
+			patch("rarebooks_control.signing.utc_now", return_value=datetime(2026, 11, 18, 12)),
+			patch("rarebooks_control.tests.control.utc_now", return_value=datetime(2026, 11, 18, 12)),
+		):
+			for _ in range(30):
+				self.assertEqual(call(api.get_state, site_body(rows[0].name), secrets[0]).status_code, 200)
+			self.assertEqual(call(api.get_state, site_body(rows[0].name), secrets[0]).status_code, 429)
+			self.assertEqual(call(api.get_state, site_body(rows[1].name), secrets[1]).status_code, 200)
 
 
 @patch("rarebooks_control.billing.clickpesa.create_checkout_link", return_value=CLICKPESA_LINK)
@@ -311,7 +321,7 @@ class IntegrationTestCreateCheckout(IntegrationTestCase):
 				)
 				self.assertEqual(response.status_code, 400)
 
-	def test_a_clickpesa_failure_answers_a_signed_502_and_keeps_no_checkout(self, create_link):
+	def test_a_clickpesa_failure_answers_a_signed_502_and_keeps_the_allocation(self, create_link):
 		# covers: AC-5 (every signed answer goes through signed_response)
 		create_link.side_effect = ClickPesaError("timeout")
 		row = make_site("down.rarebooks.app")
@@ -319,4 +329,22 @@ class IntegrationTestCreateCheckout(IntegrationTestCase):
 		response = call(api.create_checkout, checkout_body(row.name), secret)
 		self.assertEqual(response.status_code, 502)
 		answer(response, secret)
-		self.assertFalse(frappe.db.exists("Books Checkout", {"site": row.name}))
+		checkout = frappe.get_last_doc("Books Checkout", filters={"site": row.name})
+		self.assertEqual(checkout.status, "Created")
+		self.assertFalse(checkout.provider_url)
+		self.assertTrue(checkout.order_reference)
+		create_link.side_effect = None
+		self.assertEqual(call(api.create_checkout, checkout_body(row.name), secret).status_code, 200)
+		second = frappe.get_last_doc("Books Checkout", filters={"site": row.name})
+		self.assertNotEqual(checkout.order_reference, second.order_reference)
+
+	def test_changed_plan_price_creates_a_fresh_provider_checkout(self, create_link):
+		# covers: AC-3
+		row = make_site("repriced.rarebooks.app")
+		secret = row.get_password("control_secret")
+		call(api.create_checkout, checkout_body(row.name), secret)
+		frappe.db.set_value("Books Plan", self.plan.name, "amount", 130000)
+		response = call(api.create_checkout, checkout_body(row.name), secret)
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(create_link.call_count, 2)
+		self.assertEqual(create_link.call_args.args[1], "130000")

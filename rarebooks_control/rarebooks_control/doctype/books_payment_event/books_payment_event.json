@@ -108,7 +108,7 @@
    "label": "Payload"
   },
   {
-   "description": "Blanked after 90 days",
+   "description": "Raw provider webhook payload",
    "fieldname": "raw_payload",
    "fieldtype": "Long Text",
    "label": "Raw Payload",

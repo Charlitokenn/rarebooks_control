@@ -15,6 +15,7 @@ from frappe.utils import getdate, now_datetime, validate_email_address
 from werkzeug.wrappers import Response
 
 from rarebooks_control import billing, signing
+from rarebooks_control.destinations import public_destination
 from rarebooks_control.providers.clickpesa import ClickPesaError
 from rarebooks_control.rarebooks_control.doctype.books_plan.books_plan import CURRENCY_STEP
 from rarebooks_control.state import site_state
@@ -43,29 +44,33 @@ def register_site() -> Response:
 		return request.answer({}, TOO_MANY)
 
 	site, site_url, owner_email = body.get("site"), body.get("site_url"), body.get("owner_email")
-	if not _is_site_name(site) or not _is_https(site_url) or not _is_email(owner_email):
+	if not _is_site_name(site) or not public_destination(site_url) or not _is_email(owner_email):
 		return request.answer({}, BAD_REQUEST)
 
 	echo = {"site": site, "issued_at": request.issued_at}
 	existing = frappe.db.get_value(SITE, site, ["hosting_bench", "status"], as_dict=True, for_update=True)
 	if existing:
-		if existing.hosting_bench != bench or existing.status == "Removed":
-			return request.answer(echo, CONFLICT)
-		row = frappe.get_doc(SITE, site)
-		return request.answer({**echo, "secret": row.get_password("control_secret")})
+		return _registered(request, echo, existing, bench, site)
 
 	_ensure_bench(bench)
 	site_secret = secrets.token_hex(32)
-	frappe.get_doc(
-		{
-			"doctype": SITE,
-			"site": site,
-			"site_url": site_url.rstrip("/"),
-			"hosting_bench": bench,
-			"owner_email": owner_email,
-			"control_secret": site_secret,
-		}
-	).insert(ignore_permissions=True)
+	try:
+		frappe.get_doc(
+			{
+				"doctype": SITE,
+				"site": site,
+				"site_url": site_url.rstrip("/"),
+				"hosting_bench": bench,
+				"owner_email": owner_email,
+				"control_secret": site_secret,
+			}
+		).insert(ignore_permissions=True)
+	except frappe.DuplicateEntryError:
+		existing = frappe.db.get_value(SITE, site, ["hosting_bench", "status"], as_dict=True, for_update=True)
+		if not existing:
+			raise
+		return _registered(request, echo, existing, bench, site)
+
 	return request.answer({**echo, "secret": site_secret})
 
 
@@ -100,7 +105,7 @@ def create_checkout() -> Response:
 		return request.answer({"refusal": "plan_not_offered"}, CONFLICT)
 
 	token = secrets.token_urlsafe(32)
-	reused = _reusable_checkout(row.name, plan.name)
+	reused = _reusable_checkout(row.name, plan)
 	if reused:
 		# Overwrites the hash, so the older `go` link stops working; `modified` dates the new token.
 		frappe.db.set_value(CHECKOUT, reused, "token_hash", token_hash(token))
@@ -112,6 +117,13 @@ def create_checkout() -> Response:
 			frappe.log_error("Billing: create_checkout could not reach the provider", str(error))
 			return request.answer({}, PROVIDER_FAILED)
 	return request.answer({"checkout_url": billing.go_url(token)})
+
+
+def _registered(request, echo, existing, bench, site):
+	if existing.hosting_bench != bench or existing.status == "Removed":
+		return request.answer(echo, CONFLICT)
+	row = frappe.get_doc(SITE, site)
+	return request.answer({**echo, "secret": row.get_password("control_secret")})
 
 
 def offered_plans(row) -> list[dict]:
@@ -199,13 +211,16 @@ def _store_facts(row, body: dict):
 		row.update(values)
 
 
-def _reusable_checkout(site: str, plan: str) -> str | None:
+def _reusable_checkout(site: str, plan) -> str | None:
 	"""An unpaid `Created` checkout for the same site and plan made in the last 24 hours (AC-3)."""
 	return frappe.db.get_value(
 		CHECKOUT,
 		{
 			"site": site,
-			"plan": plan,
+			"plan": plan.name,
+			"amount": plan.amount,
+			"currency": plan.currency,
+			"provider_url": ("is", "set"),
 			"status": "Created",
 			"creation": (">", now_datetime() - REUSE_WINDOW),
 		},
@@ -217,7 +232,7 @@ def _reusable_checkout(site: str, plan: str) -> str | None:
 def _ensure_bench(bench: str):
 	if not frappe.db.exists("Books Hosting Bench", bench):
 		frappe.get_doc({"doctype": "Books Hosting Bench", "bench_name": bench}).insert(
-			ignore_permissions=True
+			ignore_permissions=True, ignore_if_duplicate=True
 		)
 
 
@@ -226,7 +241,10 @@ def _is_site_name(value) -> bool:
 
 
 def _is_https(value) -> bool:
-	return isinstance(value, str) and value.startswith("https://") and bool(urlsplit(value).hostname)
+	try:
+		return isinstance(value, str) and value.startswith("https://") and bool(urlsplit(value).hostname)
+	except ValueError:
+		return False
 
 
 def _is_email(value) -> bool:
@@ -235,7 +253,11 @@ def _is_email(value) -> bool:
 
 def _is_return_url(value, row) -> bool:
 	"""`https://` on the host of the site's own URL, so the return can't be an open redirect (AC-5)."""
-	return _is_https(value) and urlsplit(value).hostname == urlsplit(row.site_url).hostname
+	return (
+		_is_https(value)
+		and _is_https(row.site_url)
+		and urlsplit(value).hostname == urlsplit(row.site_url).hostname
+	)
 
 
 def _date_or_none(value):

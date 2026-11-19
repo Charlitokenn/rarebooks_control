@@ -68,6 +68,13 @@ class UnitTestClickPesaDates(UnitTestCase):
 @patch("rarebooks_control.push.queue_push")
 class IntegrationTestClickPesaPayment(IntegrationTestCase):
 	def setUp(self):
+		for target in (
+			"rarebooks_control.signing.utc_now",
+			"rarebooks_control.tests.control.utc_now",
+		):
+			clock = patch(target, return_value=datetime(2026, 11, 18, 12))
+			clock.start()
+			self.addCleanup(clock.stop)
 		reset_billing()
 		frappe.db.delete("Books Plan")
 		make_plan()
@@ -114,7 +121,7 @@ class IntegrationTestClickPesaPayment(IntegrationTestCase):
 		sendmail.assert_not_called()
 
 		stub = CustomerStub(row.get_password("control_secret"))
-		with patch("rarebooks_control.push.requests.post", stub):
+		with patch("rarebooks_control.push.post", stub):
 			push.push_site(row.name)
 		row.reload()
 		self.assertEqual((row.push_status, row.pushed_version), ("Synced", 1))
@@ -240,7 +247,7 @@ class IntegrationTestPush(IntegrationTestCase):
 		# covers: AC-13
 		row = make_site("down.push.example.com", state_version=1, push_status="Pending")
 		stub = CustomerStub(row.get_password("control_secret"), error=requests.Timeout())
-		with patch("rarebooks_control.push.requests.post", stub):
+		with patch("rarebooks_control.push.post", stub):
 			push.push_site(row.name)
 		row.reload()
 		self.assertEqual((row.push_status, row.push_attempts, row.pushed_version), ("Failing", 1, 0))
@@ -258,7 +265,7 @@ class IntegrationTestPush(IntegrationTestCase):
 
 		stub = CustomerStub(row.get_password("control_secret"), result="ignored")
 		with (
-			patch("rarebooks_control.push.requests.post", change_meanwhile),
+			patch("rarebooks_control.push.post", change_meanwhile),
 			patch("rarebooks_control.push.queue_push") as queue_push,
 		):
 			push.push_site(row.name)
@@ -269,6 +276,6 @@ class IntegrationTestPush(IntegrationTestCase):
 	def test_a_removed_site_is_never_pushed(self):
 		# covers: AC-13
 		row = make_site("removed.push.example.com", status="Removed", state_version=1)
-		with patch("rarebooks_control.push.requests.post") as post:
+		with patch("rarebooks_control.push.post") as post:
 			push.push_site(row.name)
 		post.assert_not_called()
