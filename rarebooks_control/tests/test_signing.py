@@ -30,6 +30,12 @@ class UnitTestSigningVectors(UnitTestCase):
 		self.assertEqual(response.get_data(), refusal["body"].encode())
 		self.assertEqual(response.headers[signing.SIGNATURE_HEADER], refusal["signature"])
 
+	def test_a_signature_with_non_ascii_characters_is_refused_not_raised(self):
+		# covers: AC-5 (a forged header answers 401, never a 500 from compare_digest)
+		for forged in ("sha256=\u00e9", "sha256=\u20ac" * 10, "sha256=\ud800"):
+			with self.subTest(forged=forged):
+				self.assertFalse(signing.is_valid_signature(b"{}", forged, "secret"))
+
 	def test_a_401_carries_no_detail(self):
 		# covers: AC-5
 		response = signing.unauthorized("secret")

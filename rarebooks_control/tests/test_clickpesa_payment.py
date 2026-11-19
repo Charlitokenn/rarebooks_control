@@ -142,6 +142,15 @@ class IntegrationTestClickPesaPayment(IntegrationTestCase):
 		self.assertFalse(frappe.db.exists(EVENT, {"event_id": ("like", "clickpesa:FORGED:%")}))
 		self.assertEqual(frappe.db.get_value("Books Checkout", checkout.name, "status"), "Created")
 
+	def test_a_checksum_with_non_ascii_characters_answers_401(self, queue_push, create_link):
+		# covers: AC-7 (a forged checksum is refused, never a 500 from compare_digest)
+		_, checkout = self.checkout("nonascii.rarebooks.app")
+		body = webhook_body(checkout.order_reference, payment_id="NONASCII")
+		body["checksum"] = "\u00e9" * 64
+		response, _, _ = self.deliver(body, [paid_item(checkout.order_reference)])
+		self.assertEqual(response.status_code, 401)
+		self.assertFalse(frappe.db.exists(EVENT, {"event_id": ("like", "clickpesa:NONASCII:%")}))
+
 	def test_clickpesa_down_answers_503_and_a_redelivery_applies_it(self, queue_push, create_link):
 		# covers: AC-7
 		row, checkout = self.checkout("retry.rarebooks.app")

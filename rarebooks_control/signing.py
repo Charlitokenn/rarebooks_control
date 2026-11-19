@@ -30,9 +30,11 @@ def sign(body: bytes, secret: str | bytes) -> str:
 
 
 def is_valid_signature(body: bytes, signature: str | None, secret: str | bytes | None) -> bool:
-	if not secret or not signature:
+	if not secret or not isinstance(signature, str) or not signature:
 		return False
-	return hmac.compare_digest(sign(body, secret), signature)
+	# Compare bytes: compare_digest raises TypeError on a str holding non ASCII characters, and the header
+	# is the caller's, so a forged one must answer 401, not 500 (spec 0008 AC-5).
+	return hmac.compare_digest(sign(body, secret).encode(), signature.encode("utf-8", "surrogatepass"))
 
 
 def dumps(body: dict) -> bytes:
