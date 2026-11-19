@@ -194,14 +194,14 @@ class IntegrationTestReturnPage(BillingCase):
 			subscription(
 				"I-RETURN",
 				row.name,
-				paid=("2026-12-08T21:10:00Z", "9.00"),
-				next_billing="2027-01-08T21:00:00Z",
+				paid=("2026-12-09T10:00:00Z", "9.00"),
+				next_billing="2027-01-09T10:00:00Z",
 			)
 		)
 		response = visit_return(subscription_id="I-RETURN", ba_token="BA-1")
 		self.assertEqual((response.status_code, response.location), (302, RETURN_URL.format(site=row.name)))
 		row.reload()
-		self.assertEqual((str(row.paid_until), row.auto_renews, row.state_version), ("2027-01-08", 1, 1))
+		self.assertEqual((str(row.paid_until), row.auto_renews, row.state_version), ("2027-01-09", 1, 1))
 		self.assertEqual(len(emails_to(self.sendmail, OWNER)), 1)
 
 		with patch("frappe.sendmail") as later:
@@ -306,8 +306,8 @@ class IntegrationTestReconcile(BillingCase):
 			billing_period="Monthly",
 			auto_renews=1,
 			provider_reference="I-RENEW",
-			paid_until="2027-01-08",
-			last_payment_on="2026-12-08 21:10:00",
+			paid_until="2027-01-09",
+			last_payment_on="2026-12-09 10:00:00",
 		)
 		make_paypal_checkout(row.name, "I-RENEW", self.monthly, status="Paid")
 		frappe.db.set_value(CHECKOUT, {"paypal_subscription_id": "I-RENEW"}, "creation", "2026-12-01")
@@ -315,12 +315,12 @@ class IntegrationTestReconcile(BillingCase):
 			subscription(
 				"I-RENEW",
 				row.name,
-				paid=("2027-01-08T21:05:00Z", "9.00"),
-				next_billing="2027-02-08T21:00:00Z",
+				paid=("2027-01-09T10:00:00Z", "9.00"),
+				next_billing="2027-02-09T10:00:00Z",
 			)
 		)
 		reconcile.reconcile_paypal()
-		self.assertEqual(str(frappe.db.get_value(SITE, row.name, "paid_until")), "2027-02-08")
+		self.assertEqual(str(frappe.db.get_value(SITE, row.name, "paid_until")), "2027-02-09")
 		reconcile.reconcile_paypal()
 		self.assertEqual(frappe.db.get_value(SITE, row.name, "state_version"), 1)
 

@@ -38,7 +38,7 @@ def subscription(
 	created="2026-11-20T10:00:00Z",
 	paid: tuple[str, str] | None = None,
 	currency="USD",
-	next_billing="2026-12-08T21:00:00Z",
+	next_billing="2026-12-09T10:00:00Z",
 ) -> dict:
 	"""A subscription as `GET /v1/billing/subscriptions/{id}` answers it. `paid` is (time, value)."""
 	billing_info = {"next_billing_time": next_billing}
@@ -187,48 +187,80 @@ class PayPalCase(IntegrationTestCase):
 
 
 class UnitTestPayPalDates(UnitTestCase):
-	def test_start_time_is_midnight_after_the_trial_in_the_site_zone_as_utc(self):
+	def test_start_time_is_noon_pacific_on_the_day_after_the_trial_whatever_the_site_zone(self):
 		# covers: AC-4
 		now = datetime(2026, 11, 20, 9)
-		# 9 December 00:00 in Dar es Salaam (UTC+3) is 8 December 21:00 UTC.
-		self.assertEqual(paypal_start_time(date(2026, 12, 8), None, ZONE, now), "2026-12-08T21:00:00Z")
-		self.assertEqual(paypal_start_time(date(2026, 12, 8), None, "", now), "2026-12-09T00:00:00Z")
+		# 24 November 12:00 in Los Angeles (UTC-8 in winter) is 20:00 UTC, so PayPal charges on the 24th.
+		for zone in (ZONE, "", "America/New_York", "Pacific/Honolulu"):
+			self.assertEqual(paypal_start_time(date(2026, 11, 23), None, zone, now), "2026-11-24T20:00:00Z")
+		# In summer Los Angeles is UTC-7, so noon is 19:00 UTC.
+		self.assertEqual(paypal_start_time(date(2027, 6, 30), None, ZONE, now), "2027-07-01T19:00:00Z")
 
 	def test_start_time_takes_the_later_of_the_trial_and_paid_until(self):
 		# covers: AC-4
 		now = datetime(2026, 11, 20, 9)
 		self.assertEqual(
-			paypal_start_time(date(2026, 12, 8), date(2027, 12, 8), None, now), "2027-12-09T00:00:00Z"
+			paypal_start_time(date(2026, 12, 8), date(2027, 12, 8), ZONE, now), "2027-12-09T20:00:00Z"
 		)
-		self.assertEqual(paypal_start_time(None, date(2027, 1, 1), None, now), "2027-01-02T00:00:00Z")
+		self.assertEqual(paypal_start_time(None, date(2027, 1, 1), ZONE, now), "2027-01-02T20:00:00Z")
 
-	def test_no_start_time_for_a_lapsed_site_or_one_within_five_minutes(self):
+	def test_no_start_time_unless_that_day_is_after_the_site_today(self):
 		# covers: AC-4
-		self.assertIsNone(paypal_start_time(None, None, None, datetime(2026, 11, 20)))
+		self.assertIsNone(paypal_start_time(None, None, ZONE, datetime(2026, 11, 20)))
+		# A lapsed renewal sends none, so PayPal charges at approval.
 		self.assertIsNone(
-			paypal_start_time(date(2026, 10, 1), date(2026, 11, 1), None, datetime(2026, 11, 20))
+			paypal_start_time(date(2026, 10, 1), date(2026, 11, 1), ZONE, datetime(2026, 11, 20))
 		)
-		self.assertIsNone(paypal_start_time(date(2026, 11, 19), None, None, datetime(2026, 11, 19, 23, 56)))
-		self.assertIsNotNone(
-			paypal_start_time(date(2026, 11, 19), None, None, datetime(2026, 11, 19, 23, 54))
+		# 04:00 UTC on 19 November is already the 19th in Dar es Salaam, the day after the trial: none.
+		now = datetime(2026, 11, 19, 4)
+		self.assertIsNone(paypal_start_time(date(2026, 11, 18), None, ZONE, now))
+		# It is still the 18th in New York, so the 19th is later than the site's today.
+		self.assertEqual(
+			paypal_start_time(date(2026, 11, 18), None, "America/New_York", now), "2026-11-19T20:00:00Z"
 		)
 
-	def test_paid_until_is_the_smaller_of_next_billing_and_one_period(self):
+	def test_paid_until_counts_the_charge_day_monthly_and_yearly(self):
 		# covers: AC-9
-		paid = datetime(2026, 12, 8, 21, 5)
+		first_charge = datetime(2026, 11, 24, 10)
+		# 24 December 10:00 UTC is 13:00 in Dar es Salaam: the 24th is paid, not only the 23rd.
 		self.assertEqual(
-			paypal_paid_until(None, paid, datetime(2027, 1, 8, 21), "Monthly", ZONE), date(2027, 1, 8)
+			paypal_paid_until(None, first_charge, datetime(2026, 12, 24, 10), "Monthly", ZONE),
+			date(2026, 12, 24),
 		)
-		# A next billing time far out (PayPal retrying) never grants more than one period.
 		self.assertEqual(
-			paypal_paid_until(None, paid, datetime(2027, 3, 1, 21), "Monthly", ZONE), date(2027, 1, 8)
+			paypal_paid_until(None, first_charge, datetime(2027, 11, 24, 10), "Yearly", ZONE),
+			date(2027, 11, 24),
 		)
-		self.assertEqual(paypal_paid_until(None, paid, None, "Yearly", ZONE), date(2027, 12, 8))
+
+	def test_paid_until_reads_the_payment_on_the_pacific_calendar(self):
+		# covers: AC-9
+		# A lapsed renewal charged at approval: 05:01 UTC on 19 November is the 18th in Los Angeles, and
+		# PayPal's next charge is 18 December, so the cap and next billing agree on the 18th.
+		charged = datetime(2026, 11, 19, 5, 1)
+		self.assertEqual(
+			paypal_paid_until(None, charged, datetime(2026, 12, 18, 10), "Monthly", ZONE), date(2026, 12, 18)
+		)
+
+	def test_paid_until_with_no_next_billing_uses_the_cap_alone(self):
+		# covers: AC-9
+		charge = datetime(2026, 11, 24, 10)
+		self.assertEqual(paypal_paid_until(None, charge, None, "Monthly", ZONE), date(2026, 12, 24))
+		self.assertEqual(paypal_paid_until(None, charge, None, "Yearly", ZONE), date(2027, 11, 24))
+
+	def test_a_next_billing_far_out_never_grants_more_than_one_period(self):
+		# covers: AC-9
+		# PayPal retrying a failed renewal moves next billing later; the cap holds.
+		self.assertEqual(
+			paypal_paid_until(None, datetime(2026, 11, 24, 10), datetime(2027, 3, 1, 10), "Monthly", ZONE),
+			date(2026, 12, 24),
+		)
 
 	def test_paid_until_never_moves_earlier(self):
 		# covers: AC-10
 		self.assertEqual(
-			paypal_paid_until(date(2027, 6, 1), datetime(2026, 12, 9), datetime(2027, 1, 9), "Monthly", None),
+			paypal_paid_until(
+				date(2027, 6, 1), datetime(2026, 12, 9, 10), datetime(2027, 1, 9, 10), "Monthly", None
+			),
 			date(2027, 6, 1),
 		)
 
@@ -301,7 +333,7 @@ class IntegrationTestPayPalCheckout(PayPalCase):
 		[created] = self.paypal.created
 		self.assertEqual(
 			(created["plan_id"], created["custom_id"], created["start_time"]),
-			(MONTHLY_PLAN, row.name, "2026-12-08T21:00:00Z"),
+			(MONTHLY_PLAN, row.name, "2026-12-09T20:00:00Z"),
 		)
 		self.assertTrue(created["return_url"].endswith("/api/method/rarebooks_control.billing.returned"))
 		checkout = frappe.get_last_doc(CHECKOUT, filters={"site": row.name})
@@ -386,29 +418,30 @@ class IntegrationTestPayPalWebhook(PayPalCase):
 		self.queue_push.assert_called_with(row.name)
 		sendmail.assert_not_called()
 
-		# The first charge, at 00:10 on 9 December in Dar es Salaam; PayPal bills again a month later.
+		# The first charge, at 10:00 UTC on 9 December (13:00 in Dar es Salaam); PayPal bills again a month
+		# later on its Pacific calendar, and that charge day counts as paid.
 		self.paypal.put(
 			subscription(
 				"I-TRIAL",
 				row.name,
-				paid=("2026-12-08T21:10:00Z", "9.00"),
-				next_billing="2027-01-08T21:00:00Z",
+				paid=("2026-12-09T10:00:00Z", "9.00"),
+				next_billing="2027-01-09T10:00:00Z",
 			)
 		)
 		sale = {"id": "SALE-1", "billing_agreement_id": "I-TRIAL", "amount": {"total": "9.00"}}
 		_, data, _ = self.deliver(event_body("PAYMENT.SALE.COMPLETED", sale))
 		self.assertEqual(data, {"result": "applied"})
-		self.assertEqual(self.state(row.name), ("2027-01-08", "PayPal", "Monthly", 1, "I-TRIAL"))
+		self.assertEqual(self.state(row.name), ("2027-01-09", "PayPal", "Monthly", 1, "I-TRIAL"))
 		self.assertEqual(frappe.db.get_value(CHECKOUT, checkout, "status"), "Paid")
 		event = frappe.get_last_doc(EVENT, filters={"event_type": "PAYMENT.SALE.COMPLETED"})
 		self.assertEqual(
-			(event.outcome, str(event.paid_until_after), event.currency), ("Applied", "2027-01-08", "USD")
+			(event.outcome, str(event.paid_until_after), event.currency), ("Applied", "2027-01-09", "USD")
 		)
 
 	def test_events_in_any_order_end_in_the_same_state(self):
 		# covers: AC-9
 		paid = subscription(
-			"I-ORDER", "", paid=("2026-12-08T21:10:00Z", "9.00"), next_billing="2027-01-08T21:00:00Z"
+			"I-ORDER", "", paid=("2026-12-09T10:00:00Z", "9.00"), next_billing="2027-01-09T10:00:00Z"
 		)
 		finals = []
 		for site, order in (
@@ -425,7 +458,7 @@ class IntegrationTestPayPalWebhook(PayPalCase):
 			finals.append(self.state(row.name)[:4])
 			self.assertEqual(frappe.db.get_value(SITE, row.name, "state_version"), 1)
 		self.assertEqual(finals[0], finals[1])
-		self.assertEqual(finals[0], ("2027-01-08", "PayPal", "Monthly", 1))
+		self.assertEqual(finals[0], ("2027-01-09", "PayPal", "Monthly", 1))
 
 	def test_cancelled_keeps_paid_until_and_stops_renewal(self):
 		# covers: AC-9, AC-10
@@ -435,17 +468,17 @@ class IntegrationTestPayPalWebhook(PayPalCase):
 			billing_period="Monthly",
 			auto_renews=1,
 			provider_reference="I-CANCEL",
-			paid_until="2027-01-08",
-			last_payment_on="2026-12-08 21:10:00",
+			paid_until="2027-01-09",
+			last_payment_on="2026-12-09 10:00:00",
 		)
 		make_paypal_checkout(row.name, "I-CANCEL", self.monthly, status="Paid")
 		for status in ("SUSPENDED", "CANCELLED", "EXPIRED"):
 			with self.subTest(status=status):
 				self.paypal.put(
-					subscription("I-CANCEL", row.name, status=status, paid=("2026-12-08T21:10:00Z", "9.00"))
+					subscription("I-CANCEL", row.name, status=status, paid=("2026-12-09T10:00:00Z", "9.00"))
 				)
 				self.deliver(event_body(f"BILLING.SUBSCRIPTION.{status}", {"id": "I-CANCEL"}))
-				self.assertEqual(self.state(row.name), ("2027-01-08", "PayPal", "Monthly", 0, "I-CANCEL"))
+				self.assertEqual(self.state(row.name), ("2027-01-09", "PayPal", "Monthly", 0, "I-CANCEL"))
 
 	def test_a_retry_period_that_moves_next_billing_grants_no_days(self):
 		# covers: AC-9
@@ -455,29 +488,29 @@ class IntegrationTestPayPalWebhook(PayPalCase):
 			billing_period="Monthly",
 			auto_renews=1,
 			provider_reference="I-RETRYING",
-			paid_until="2027-01-08",
-			last_payment_on="2026-12-08 21:10:00",
+			paid_until="2027-01-09",
+			last_payment_on="2026-12-09 10:00:00",
 		)
 		make_paypal_checkout(row.name, "I-RETRYING", self.monthly, status="Paid")
 		self.paypal.put(
 			subscription(
 				"I-RETRYING",
 				row.name,
-				paid=("2026-12-08T21:10:00Z", "9.00"),
-				next_billing="2027-01-15T21:00:00Z",
+				paid=("2026-12-09T10:00:00Z", "9.00"),
+				next_billing="2027-01-16T10:00:00Z",
 			)
 		)
 		_, data, _ = self.deliver(event_body("BILLING.SUBSCRIPTION.UPDATED", {"id": "I-RETRYING"}))
 		self.assertEqual(data, {"result": "ignored"})
-		self.assertEqual(self.state(row.name)[0], "2027-01-08")
+		self.assertEqual(self.state(row.name)[0], "2027-01-09")
 		self.assertEqual(frappe.db.get_value(SITE, row.name, "state_version"), 0)
 
 	def test_an_unknown_plan_or_a_wrong_amount_is_a_mismatch(self):
 		# covers: AC-9, AC-10
 		for site, values in (
 			("pp-plan.rarebooks.app", {"plan_id": "P-UNKNOWN"}),
-			("pp-short.rarebooks.app", {"paid": ("2026-12-08T21:10:00Z", "8.99")}),
-			("pp-eur.rarebooks.app", {"paid": ("2026-12-08T21:10:00Z", "9.00"), "currency": "EUR"}),
+			("pp-short.rarebooks.app", {"paid": ("2026-12-09T10:00:00Z", "8.99")}),
+			("pp-eur.rarebooks.app", {"paid": ("2026-12-09T10:00:00Z", "9.00"), "currency": "EUR"}),
 		):
 			with self.subTest(site=site):
 				row = self.site(site)
@@ -508,7 +541,7 @@ class IntegrationTestPayPalWebhook(PayPalCase):
 			billing_period="Monthly",
 			auto_renews=1,
 			provider_reference="I-REFUND",
-			paid_until="2027-01-08",
+			paid_until="2027-01-09",
 		)
 		make_paypal_checkout(row.name, "I-REFUND", self.monthly, status="Paid")
 		for event_type in ("PAYMENT.SALE.REFUNDED", "PAYMENT.SALE.REVERSED"):
@@ -524,7 +557,7 @@ class IntegrationTestPayPalWebhook(PayPalCase):
 				event = frappe.get_last_doc(EVENT, filters={"event_type": event_type})
 				self.assertEqual((event.site, event.currency), (row.name, "USD"))
 				sendmail.assert_called_once()
-		self.assertEqual(self.state(row.name), ("2027-01-08", "PayPal", "Monthly", 1, "I-REFUND"))
+		self.assertEqual(self.state(row.name), ("2027-01-09", "PayPal", "Monthly", 1, "I-REFUND"))
 		self.assertEqual(frappe.db.get_value(SITE, row.name, "state_version"), 0)
 
 	def test_a_payment_failure_is_kept_and_changes_nothing(self):
@@ -581,7 +614,7 @@ class IntegrationTestPayPalWebhook(PayPalCase):
 		self.paypal.put(subscription("I-NOCHECKOUT", row.name))
 		removed = self.site("pp-removed.rarebooks.app", status="Removed")
 		make_paypal_checkout(removed.name, "I-REMOVED", self.monthly)
-		self.paypal.put(subscription("I-REMOVED", removed.name, paid=("2026-12-08T21:10:00Z", "9.00")))
+		self.paypal.put(subscription("I-REMOVED", removed.name, paid=("2026-12-09T10:00:00Z", "9.00")))
 		self.paypal.put(subscription("I-NOSITE", "gone.rarebooks.app"))
 
 		for sub_id, site in (

@@ -52,22 +52,25 @@ def clickpesa_paid_until(old_paid_until, paid_on: datetime, trial_ends_on, time_
 
 
 PERIODS = {"Monthly": relativedelta(months=1), "Yearly": relativedelta(years=1)}
-# A start this close to now is left out, so PayPal charges at approval instead (AC-4).
-START_TIME_MARGIN = timedelta(minutes=5)
+# PayPal counts its billing days on the Pacific calendar and charges at about 10:00 UTC on the Pacific date
+# of `start_time` (sandbox run 2026-11-19, spec 0008 amendment "PayPal billing dates").
+PAYPAL_ZONE = "America/Los_Angeles"
+# Noon leaves 8 hours either side of the Pacific day, so a daylight saving shift can't move the charge day.
+PAYPAL_START_HOUR = time(12)
 
 
 def paypal_start_time(trial_ends_on, paid_until, time_zone, now: datetime) -> str | None:
-	"""00:00 of the later of the day after the trial and the day after `paid_until`, in the site's zone, as
-	UTC `Z`; None when there is no such day, or it is not more than 5 minutes after `now` (AC-4).
-
-	`now` is naive UTC.
+	"""12:00 Pacific on the later of the day after the trial and the day after `paid_until`, as UTC `Z`;
+	None when there is no such day, or it is not later than the site's today, so PayPal charges at approval
+	(spec 0008 AC-4). `now` is naive UTC.
 	"""
 	days = [getdate(value) + ONE_DAY for value in (trial_ends_on, paid_until) if value]
 	if not days:
 		return None
-	start = datetime.combine(max(days), time(), tzinfo=site_zone(time_zone)).astimezone(UTC)
-	if start - now.replace(tzinfo=UTC) <= START_TIME_MARGIN:
+	day = max(days)
+	if day <= site_date(now, time_zone):
 		return None
+	start = datetime.combine(day, PAYPAL_START_HOUR, tzinfo=ZoneInfo(PAYPAL_ZONE)).astimezone(UTC)
 	return start.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -78,11 +81,12 @@ def paypal_paid_until(
 	billing_period: str,
 	time_zone,
 ) -> date:
-	"""The smaller of (the next billing day minus 1) and (the payment day plus one period minus 1), both as
-	site days, and never earlier than the old end (AC-9, AC-10). Moments are naive UTC."""
-	paid_until = site_date(last_payment_on, time_zone) + PERIODS[billing_period] - ONE_DAY
+	"""The smaller of (the next billing day in the site's zone) and (the payment's Pacific day plus one
+	period), never earlier than the old end (spec 0008 AC-9, AC-10). The charge day counts as paid, so a
+	renewing site never reads as grace on the morning before PayPal charges. Moments are naive UTC."""
+	paid_until = site_date(last_payment_on, PAYPAL_ZONE) + PERIODS[billing_period]
 	if next_billing_on:
-		paid_until = min(paid_until, site_date(next_billing_on, time_zone) - ONE_DAY)
+		paid_until = min(paid_until, site_date(next_billing_on, time_zone))
 	if old_paid_until:
 		paid_until = max(paid_until, getdate(old_paid_until))
 	return paid_until
