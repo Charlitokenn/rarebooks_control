@@ -13,6 +13,8 @@ The data model of the control site (spec 0008, plus Books Hosting Bench from spe
 | `books_checkout/` | One checkout attempt, found by its hidden `token_hash` |
 | `books_payment_event/` | Provider events, unique by `event_id` so each is handled once |
 | `books_hosting_bench/` | The benches that host sites |
+| `books_removal_case/` | One removal of one hosted site (spec 0007): status, export, hold, approvals. `books_removal_case.js` adds the Approve, Pause, Resume and Retry buttons |
+| `books_removal_warning/` | Child table of a case: one row per warning email sent |
 | `../../tests/data_model.py` | Test helpers: one user per role, `make_bench`, `make_site` |
 
 ## Conventions
@@ -21,6 +23,7 @@ The data model of the control site (spec 0008, plus Books Hosting Bench from spe
 - Set every permission right explicitly in the schema, since Frappe otherwise grants create, write, delete and share to a new row. No role can delete any billing record.
 - Roles: Billing Manager writes billing data and plans; System Manager and Removal Manager only read billing data. System Manager creates benches, Removal Manager edits them.
 - Books Hosted Site, Books Checkout and Books Payment Event are created only by the control site's own code, never from desk.
+- Books Removal Case is read only in desk for every role, keeps track changes, and no role deletes it. Its status changes only through `removal.py`: the runner endpoints and the Removal Manager actions (spec 0007 AC-13, AC-17).
 - Billing fields on Books Hosted Site sit at permlevel 1, so only a Billing Manager writes them. A new billing field needs permlevel 1 and an entry in `BILLING_FIELDS` in the test.
 - Secrets live in hidden `Password` fields (stored encrypted, kept out of Version diffs). Read them with `doc.get_password(...)`.
 - Tests subclass `frappe.tests.IntegrationTestCase` and build rows through the helpers in `tests/data_model.py`.

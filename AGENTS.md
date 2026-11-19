@@ -45,6 +45,7 @@ Specs are referenced by number in commits, comments and tests (for example spec 
 - Schema changes go through `bench migrate`; data fixes go in `rarebooks_control/patches/` and are listed in `patches.txt`.
 - Signed endpoints (`api.py`, `webhooks.py`) answer through `signing.signed_response`, never `frappe.throw` or Frappe's `message` wrapper, so the bytes signed are the bytes sent (spec 0008 AC-5).
 - `tests/signing_vectors.json` must stay byte for byte identical to `frappe_books/tests/signing_vectors.json` in `rarebooks-web`. Change both together.
+- Email the operator through `alerts.send_ops`, never `frappe.sendmail(now=True)`: Frappe sends that after the commit with no guard, so an SMTP outage turns a saved change into HTTP 500 and a signed endpoint loses its answer.
 - Every payment change goes through `billing.confirm_*`: lock the site row, ask the provider, then write. A webhook body alone never changes billing (spec 0008 AC-7).
 - Only `providers/clickpesa.py` talks to ClickPesa; tests patch its functions. Its credentials come from site config (`clickpesa_client_id`, `clickpesa_api_key`, `clickpesa_checksum_key`) and are never logged.
 
