@@ -6,7 +6,7 @@ disagree, and nothing changes from a webhook body alone.
 """
 
 import json
-from datetime import timedelta
+from datetime import UTC, timedelta
 from decimal import Decimal, InvalidOperation
 
 import frappe
@@ -18,8 +18,7 @@ from werkzeug.wrappers import Response
 
 from rarebooks_control.alerts import send_ops
 from rarebooks_control.providers import clickpesa, paypal
-from rarebooks_control.push import mark_changed
-from rarebooks_control.signing import utc_now
+from rarebooks_control.signing import parse_issued_at, utc_now
 from rarebooks_control.state import (
 	clickpesa_paid_until,
 	parse_utc,
@@ -76,12 +75,16 @@ def new_checkout(row, plan, return_url: str, token_hash: str):
 		checkout.paypal_subscription_id, checkout.provider_url = paypal.create_subscription(
 			paypal_plan_id, row.name, returned_url(), start_time, BRAND_NAME
 		)
-	else:
-		checkout.order_reference = order_reference(checkout.name)
-		checkout.provider_url = clickpesa.create_checkout_link(
-			checkout.order_reference, whole_amount(plan.amount), plan.currency, row.owner_email
-		)
-	return checkout.insert(ignore_permissions=True)
+		return checkout.insert(ignore_permissions=True)
+	checkout.order_reference = order_reference(checkout.name)
+	# Persist the allocation before the external side effect. A lost response leaves an order
+	# that webhooks and reconciliation can confirm; never generate this reference again.
+	checkout.insert(ignore_permissions=True)
+	frappe.db.commit()
+	checkout.provider_url = clickpesa.create_checkout_link(
+		checkout.order_reference, whole_amount(plan.amount), plan.currency, row.owner_email
+	)
+	return checkout.save(ignore_permissions=True)
 
 
 def order_reference(checkout_name: str) -> str:
@@ -194,14 +197,13 @@ def confirm_clickpesa(checkout_name: str, event_name: str) -> str:
 	return finish(event, "Applied", row)
 
 
-def apply_clickpesa(row, checkout, item: dict):
+def apply_clickpesa(row, checkout, payment):
 	"""One year from the AC-8 start. A provider never moves `paid_until` earlier (AC-10)."""
-	now = utc_now()
 	checkout.status = "Paid"
-	checkout.paid_on = checkout.paid_on or now
+	checkout.paid_on = checkout.paid_on or payment_time(payment).replace(tzinfo=None)
 	checkout.save(ignore_permissions=True)
 
-	before = site_state(row)
+	paid_until_before = row.paid_until
 	paid_until = clickpesa_paid_until(row.paid_until, checkout.paid_on, row.trial_ends_on, row.time_zone)
 	if row.paid_until and getdate(row.paid_until) > paid_until:
 		paid_until = getdate(row.paid_until)
@@ -215,19 +217,48 @@ def apply_clickpesa(row, checkout, item: dict):
 			"last_payment_on": checkout.paid_on,
 		}
 	)
-	if site_state(row) != before:
-		mark_changed(row)
 	row.save(ignore_permissions=True)
-	if site_state(row)["paid_until"] != before["paid_until"]:
+	# One receipt for a payment that moved `paid_until` (AC-19).
+	if not paid_until_before or getdate(paid_until_before) != getdate(paid_until):
 		send_receipt(
-			row, checkout.plan, decimal_amount(item.get("collectedAmount")), item.get("collectedCurrency")
+			row,
+			checkout.plan,
+			decimal_amount(payment.get("collectedAmount")),
+			payment.get("collectedCurrency"),
 		)
 
 
 def paid_items(items: list[dict]) -> list[dict]:
 	"""ClickPesa's paid items for an order, oldest first: the first one is the payment that counts."""
 	paid = [item for item in items if item.get("status") in clickpesa.PAID_STATUSES]
-	return sorted(paid, key=lambda item: str(item.get("createdAt") or ""))
+	return sorted(paid, key=lambda item: (payment_time(item), str(item.get("id") or "")))
+
+
+def payment_time(item: dict):
+	moment = parse_issued_at(item.get("createdAt"))
+	if moment is None:
+		raise clickpesa.ClickPesaError("paid payment has no valid timezone-aware createdAt")
+	return moment.replace(tzinfo=UTC)
+
+
+def reconcile_allocations():
+	"""Recover payments on durable allocations whose checkout-link response was lost."""
+	from rarebooks_control.webhooks import store_event
+
+	for name in frappe.get_all(
+		CHECKOUT,
+		filters={"provider": "ClickPesa", "status": "Created", "provider_url": ("is", "not set")},
+		pluck="name",
+	):
+		try:
+			event_id = f"reconcile:{name}"
+			event = frappe.db.get_value(EVENT, {"event_id": event_id}, "name")
+			if not event:
+				event = store_event(event_id, "ClickPesa", "Reconcile", b"{}").name
+			confirm_clickpesa(name, event)
+			frappe.db.commit()
+		except clickpesa.ClickPesaError:
+			frappe.db.rollback()
 
 
 def matches_checkout(item: dict, checkout) -> bool:
@@ -485,9 +516,8 @@ def apply_paypal(row, subscription: dict, plan, payment: dict | None, checkout) 
 			checkout.status = "Paid"
 			checkout.paid_on = checkout.paid_on or utc_now()
 			checkout.save(ignore_permissions=True)
+	# BooksHostedSite.before_save bumps `state_version` and queues the push when a pushed field changed.
 	changed = site_state(row) != before
-	if changed:
-		mark_changed(row)
 	row.save(ignore_permissions=True)
 	if payment and site_state(row)["paid_until"] != before["paid_until"]:
 		send_receipt(row, plan.name, payment["amount"], payment["currency"])

@@ -13,7 +13,7 @@ export_python_type_annotations = True
 scheduler_events = {
 	"cron": {
 		# Spec 0008 AC-13: pushes that are pending, or failing and due.
-		"* * * * *": ["rarebooks_control.push.sweep"],
+		"* * * * *": ["rarebooks_control.push.sweep", "rarebooks_control.billing.reconcile_allocations"],
 	},
 	# Spec 0008 AC-10, AC-16, AC-18: checkout expiry and the ClickPesa reconcile hourly; the PayPal
 	# reconcile, the 90 day payload purge and the payment failure digest daily.

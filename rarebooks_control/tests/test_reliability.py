@@ -131,9 +131,7 @@ class IntegrationTestPushAlerts(BillingCase):
 		)
 
 	def push_once(self, row, **stub):
-		with patch(
-			"rarebooks_control.push.requests.post", CustomerStub(row.get_password("control_secret"), **stub)
-		):
+		with patch("rarebooks_control.push.post", CustomerStub(row.get_password("control_secret"), **stub)):
 			push.push_site(row.name)
 		row.reload()
 

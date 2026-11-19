@@ -70,11 +70,11 @@ def parse_issued_at(value) -> datetime | None:
 		return None
 	try:
 		issued = datetime.fromisoformat(value)
-	except ValueError:
+		if issued.tzinfo is None:
+			return None
+		return issued.astimezone(UTC).replace(tzinfo=None)
+	except (ValueError, OverflowError):
 		return None
-	if issued.tzinfo is None:
-		return None
-	return issued.astimezone(UTC).replace(tzinfo=None)
 
 
 def is_fresh(value) -> bool:

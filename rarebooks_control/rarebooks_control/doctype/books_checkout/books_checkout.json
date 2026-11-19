@@ -120,8 +120,7 @@
    "fieldname": "provider_url",
    "fieldtype": "Small Text",
    "label": "Provider URL",
-   "read_only": 1,
-   "reqd": 1
+   "read_only": 1
   },
   {
    "fieldname": "return_url",

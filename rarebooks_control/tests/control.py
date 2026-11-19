@@ -2,14 +2,14 @@
 
 import json
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, timedelta
 from unittest.mock import patch
 
 import frappe
 from frappe.utils import set_request
 
 from rarebooks_control.providers import clickpesa
-from rarebooks_control.signing import SIGNATURE_HEADER, is_valid_signature, sign
+from rarebooks_control.signing import SIGNATURE_HEADER, is_valid_signature, sign, utc_now
 
 RUNNER_SECRET = "runner-test-secret-0123456789abcdef0123456789abcdef"
 CHECKSUM_KEY = "clickpesa-test-checksum-key"
@@ -17,7 +17,7 @@ CLICKPESA_LINK = "https://checkout.clickpesa.com/pay/abc"
 
 
 def issued(offset: timedelta = timedelta()) -> str:
-	return (datetime.now(UTC) + offset).isoformat()
+	return (utc_now().replace(tzinfo=UTC) + offset).isoformat()
 
 
 def call(method, body: dict | bytes, secret: str | None = None, signature: str | None = None, **kwargs):
@@ -137,7 +137,8 @@ class CustomerStub:
 		self.secret, self.result, self.status, self.error = secret, result, status, error
 		self.pushes: list[dict] = []
 
-	def __call__(self, url, data, headers, timeout):
+	def __call__(self, url, data, headers, timeout, allow_redirects):
+		assert allow_redirects is False
 		assert url.endswith("/api/method/frappe_books.subscription.receive_state")
 		if self.error:
 			raise self.error
