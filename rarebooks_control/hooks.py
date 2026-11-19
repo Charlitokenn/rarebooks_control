@@ -20,6 +20,7 @@ scheduler_events = {
 	},
 	# Spec 0008 AC-10, AC-16, AC-18: checkout expiry and the ClickPesa reconcile hourly; the PayPal
 	# reconcile, the 90 day payload purge and the payment failure digest daily.
-	"hourly": ["rarebooks_control.reconcile.hourly"],
-	"daily": ["rarebooks_control.reconcile.daily"],
+	# Spec 0007 AC-21: removal alerts hourly, the approval list and the removal digest daily.
+	"hourly": ["rarebooks_control.reconcile.hourly", "rarebooks_control.removal_mail.hourly"],
+	"daily": ["rarebooks_control.reconcile.daily", "rarebooks_control.removal_mail.daily"],
 }

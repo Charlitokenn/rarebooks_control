@@ -17,9 +17,9 @@ from frappe.utils import get_datetime, get_url, getdate, now_datetime
 from werkzeug.utils import redirect
 from werkzeug.wrappers import Response
 
+from rarebooks_control import push
 from rarebooks_control.alerts import send_ops
 from rarebooks_control.providers import clickpesa, paypal
-from rarebooks_control import push
 from rarebooks_control.signing import parse_issued_at, utc_now
 from rarebooks_control.state import (
 	clickpesa_paid_until,
@@ -159,7 +159,7 @@ def confirm_clickpesa(checkout_name: str, event_name: str) -> str:
 		first.get("collectedCurrency"),
 	)
 
-	if row.status == "Removed":
+	if is_removed(row):
 		alert_ops(
 			_("Payment for a removed site {0}").format(row.name),
 			_("Refund it, or restore the site and apply it by hand."),
@@ -384,7 +384,7 @@ def confirm_paypal(subscription_id: str, event_name: str) -> str:
 
 	status = subscription.get("status")
 	payment = new_paypal_payment(subscription, row)
-	if row.status == "Removed":
+	if is_removed(row):
 		if not payment and status != "ACTIVE":
 			return finish(event, "Ignored", row)
 		alert_paypal_ops(
@@ -670,6 +670,14 @@ def returned(subscription_id: str | None = None) -> Response:
 		frappe.db.rollback()
 		frappe.log_error("Billing: the return page could not confirm with the provider", str(error))
 	return redirect(checkout.return_url, code=302)
+
+
+def is_removed(row) -> bool:
+	"""A payment for a site that is `Removed` or being dropped is stored as `Unknown`, not applied, and the
+	operator is told (AC-17). A site whose case is only `Holding` is paid as normal; its case is cancelled."""
+	from rarebooks_control.removal import is_dropping
+
+	return row.status == "Removed" or is_dropping(row.name)
 
 
 def billing_state(site: str) -> dict:

@@ -47,3 +47,24 @@ def make_site(site: str, secret: str | None = None, **values):
 		}
 	)
 	return doc.insert(ignore_permissions=True)
+
+
+def make_outgoing_email_account():
+	"""A default outgoing Email Account, so `frappe.sendmail` queues for real. Tests never send the queue."""
+	name = "Removal Test Outgoing"
+	if frappe.db.exists("Email Account", name):
+		return
+	doc = frappe.get_doc(
+		{
+			"doctype": "Email Account",
+			"email_account_name": name,
+			"email_id": "control@example.com",
+			"enable_outgoing": 1,
+			"default_outgoing": 1,
+			"smtp_server": "localhost",
+			"no_smtp_authentication": 1,
+		}
+	)
+	# Its validate would try to reach the SMTP server.
+	doc.flags.ignore_validate = True
+	doc.insert(ignore_permissions=True)

@@ -66,9 +66,15 @@ def clickpesa_conf():
 
 
 def reset_billing():
-	"""Delete every registry row, checkout and event, and commit. Webhooks and pushes commit their own work,
+	"""Delete every registry row, checkout, event and removal case, and commit. Webhooks and pushes commit their own work,
 	so the rows outlive a test's rollback."""
-	for doctype in ("Books Payment Event", "Books Checkout", "Books Hosted Site"):
+	for doctype in (
+		"Books Removal Warning",
+		"Books Removal Case",
+		"Books Payment Event",
+		"Books Checkout",
+		"Books Hosted Site",
+	):
 		frappe.db.delete(doctype)
 	frappe.db.commit()
 	frappe.cache.delete_keys("rl:")

@@ -14,7 +14,7 @@ import frappe
 from frappe.utils import getdate, now_datetime, validate_email_address
 from werkzeug.wrappers import Response
 
-from rarebooks_control import billing, signing
+from rarebooks_control import billing, removal, signing
 from rarebooks_control.destinations import public_destination
 from rarebooks_control.providers import paypal
 from rarebooks_control.providers.clickpesa import ClickPesaError
@@ -102,6 +102,9 @@ def create_checkout() -> Response:
 
 	row = frappe.get_doc(SITE, row.name, for_update=True)
 	_store_facts(row, body)
+	# Spec 0007 AC-11: no payment starts while a drop can start.
+	if removal.is_being_removed(row.name):
+		return request.answer({"refusal": "being_removed"}, CONFLICT)
 	plan = plan_for(row, provider, period)
 	if not plan:
 		return request.answer({"refusal": "plan_not_offered"}, CONFLICT)
