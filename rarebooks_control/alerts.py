@@ -13,11 +13,23 @@ def send_ops(subject: str, lines: list[str], now: bool = True):
 		frappe.log_error(f"Billing alert with no books_ops_email set: {subject}", "\n".join(lines))
 		return
 	try:
-		frappe.sendmail(
+		queue = frappe.sendmail(
 			recipients=[recipient],
 			subject=subject,
 			message="<br>".join(frappe.utils.escape_html(line) for line in lines),
-			now=now,
 		)
 	except Exception:
 		frappe.log_error(f"Billing alert could not be sent: {subject}")
+		return
+	if now and queue:
+		# Not `sendmail(now=True)`: Frappe sends that after the commit with no guard, so an SMTP outage
+		# turns a saved change into HTTP 500, and a signed endpoint loses its answer (spec 0008 AC-5,
+		# spec 0007 AC-12). The row stays queued, so the scheduler sends it if this try fails.
+		frappe.db.after_commit.add(lambda: _send_queued(queue, subject))
+
+
+def _send_queued(queue, subject: str):
+	try:
+		queue.send()
+	except Exception:
+		frappe.log_error(f"Billing alert queued, not sent yet: {subject}", defer_insert=True)

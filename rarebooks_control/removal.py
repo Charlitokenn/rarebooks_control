@@ -149,7 +149,9 @@ def step_failed() -> Response:
 
 	error = body.get("error")
 	case.last_error = (error if isinstance(error, str) else "")[:ERROR_CHARACTERS]
-	if case.status in ("Exporting", "Dropping"):
+	# A drop can fail before `drop_starting` (no root login, a site it can't read), so the case is still
+	# `Holding`. It counts too, or a broken runner would retry every hour with no alert (AC-12).
+	if case.status in ("Exporting", "Dropping") or (case.status == "Holding" and body["step"] == "drop"):
 		case.attempts = (case.attempts or 0) + 1
 		if case.attempts >= MAX_ATTEMPTS:
 			fail(case, _("The {0} step failed {1} times.").format(body["step"], case.attempts))

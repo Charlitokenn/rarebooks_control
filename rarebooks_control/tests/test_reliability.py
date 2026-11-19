@@ -106,6 +106,12 @@ class BillingCase(IntegrationTestCase):
 		self.start(patch("rarebooks_control.providers.paypal.is_verified_webhook", return_value=True))
 		self.payments = self.start(patch("rarebooks_control.providers.clickpesa.payments", return_value=[]))
 		self.start(clickpesa_conf())
+		frappe.db.after_commit.reset()
+
+	def sent_at_once(self) -> bool:
+		"""Runs what the commit would, then tells whether a queued email was sent right away."""
+		frappe.db.after_commit.run()
+		return self.sendmail.return_value.send.called
 
 	def start(self, patcher):
 		value = patcher.start() if hasattr(patcher, "start") else patcher.__enter__()
@@ -144,7 +150,7 @@ class IntegrationTestPushAlerts(BillingCase):
 		row = self.failing_site("six.push.example.com", hours=6.1)
 		self.push_once(row, error=requests.Timeout())
 		[email] = emails_to(self.sendmail, OPS)
-		self.assertTrue(email["now"])
+		self.assertTrue(self.sent_at_once())
 		self.assertIn("6 hours", email["subject"])
 		self.assertEqual((row.failing_alerted, row.push_status, row.push_attempts), (1, "Failing", 6))
 
@@ -155,8 +161,8 @@ class IntegrationTestPushAlerts(BillingCase):
 		# covers: AC-13
 		row = self.site("refuses.push.example.com", state_version=1, push_status="Pending")
 		self.push_once(row, status=400)
-		[email] = emails_to(self.sendmail, OPS)
-		self.assertTrue(email["now"])
+		[_email] = emails_to(self.sendmail, OPS)
+		self.assertTrue(self.sent_at_once())
 		self.assertEqual(row.last_push_error, "push answered HTTP 400")
 		self.push_once(row, status=400)
 		self.assertEqual(len(emails_to(self.sendmail, OPS)), 1)
@@ -417,7 +423,7 @@ class IntegrationTestRecordKeeping(BillingCase):
 		self.assertEqual(email["subject"], "1 failed PayPal payments")
 		self.assertIn("WH-FAILED,", email["message"] + ",")
 		self.assertNotIn("WH-FAILED-OLD", email["message"])
-		self.assertFalse(email["now"])
+		self.assertFalse(self.sent_at_once())
 
 
 class IntegrationTestBillingState(BillingCase):

@@ -623,6 +623,19 @@ class TestCancelAndFailure(RemovalTestCase):
 		)
 		self.assertEqual(response.status_code, 400)
 
+	def test_a_drop_failing_before_drop_starting_still_counts(self):
+		# covers: AC-12 (a runner with no root login fails the drop while the case is still `Holding`)
+		make_site("no-root.rarebooks.app")
+		case = self.to_drop_due("no-root.rarebooks.app")
+		with patch("rarebooks_control.removal_mail.send_ops") as send_ops:
+			for attempt in (1, 2, 3):
+				_response, data = self.runner(
+					removal.step_failed, case=case.name, site=case.site, step="drop", error="no root login"
+				)
+				self.assertEqual(data["status"], "Holding" if attempt < 3 else "Failed")
+			send_ops.assert_called_once()
+		self.assertEqual(self.case(case.site).attempts, 3)
+
 	def test_a_deferred_export_counts_no_attempt(self):
 		# covers: AC-12
 		make_site("defer.rarebooks.app")
@@ -754,6 +767,21 @@ class TestActions(RemovalTestCase):
 
 
 class TestAlerts(RemovalTestCase):
+	def test_an_alert_the_mail_server_refuses_never_fails_the_commit(self):
+		# covers: AC-12, AC-21 (and spec 0008 AC-5: a signed endpoint keeps its answer)
+		from rarebooks_control.alerts import send_ops
+
+		frappe.db.after_commit.reset()
+		before = frappe.db.count("Email Queue")
+		with patch(
+			"frappe.email.doctype.email_queue.email_queue.EmailQueue.send",
+			side_effect=frappe.ValidationError("Connection refused"),
+		) as send:
+			send_ops("Removal case RC-0 failed", ["line"])
+			frappe.db.after_commit.run()
+		send.assert_called_once()
+		self.assertEqual(frappe.db.count("Email Queue"), before + 1, "it stays queued for the scheduler")
+
 	def test_silent_bench_and_stuck_drop_alert_once(self):
 		# covers: AC-21
 		frappe.cache.delete_keys("removal-alert:")
