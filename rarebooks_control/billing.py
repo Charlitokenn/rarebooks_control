@@ -6,6 +6,7 @@ disagree, and nothing changes from a webhook body alone.
 """
 
 import json
+import secrets
 from datetime import UTC, timedelta
 from decimal import Decimal, InvalidOperation
 
@@ -18,6 +19,7 @@ from werkzeug.wrappers import Response
 
 from rarebooks_control.alerts import send_ops
 from rarebooks_control.providers import clickpesa, paypal
+from rarebooks_control import push
 from rarebooks_control.signing import parse_issued_at, utc_now
 from rarebooks_control.state import (
 	clickpesa_paid_until,
@@ -40,6 +42,8 @@ GONE = 410
 # Languages a receipt is written in; any other gets English (AC-19).
 RECEIPT_LANGUAGES = ("en", "sw")
 BRAND_NAME = "RareBooks"
+# Runs Push now and Rotate secret (spec 0008 AC-20).
+BILLING_MANAGER = "Billing Manager"
 # PayPal statuses that say who pays and whether it renews; any other (APPROVAL_PENDING, APPROVED) waits.
 PAYPAL_SETTLED_STATUSES = ("ACTIVE", "CANCELLED", "SUSPENDED", "EXPIRED")
 
@@ -687,3 +691,35 @@ def billing_state(site: str) -> dict:
 		"auto_renews": int(row.auto_renews or 0),
 		"checkout_in_last_24h": bool(recent),
 	}
+
+
+@frappe.whitelist(methods=["POST"])
+def push_now(site: str) -> dict:
+	"""Queue a push of the site's current state at once (spec 0008 AC-14). Billing Manager only (AC-20)."""
+	frappe.only_for(BILLING_MANAGER)
+	row = _active_site(site)
+	push.queue_push(row.name)
+	return {"queued": True}
+
+
+@frappe.whitelist(methods=["POST"])
+def rotate_secret(site: str) -> dict:
+	"""Start a rotation: a new `pending_secret`, carried to the site by its bench's next `report_sites`
+	(spec 0008 AC-15). Both secrets are accepted until the bench calls `secret_rotated`. The secret is never
+	shown or returned here. Billing Manager only (AC-20)."""
+	frappe.only_for(BILLING_MANAGER)
+	row = _active_site(site, for_update=True)
+	if row.pending_secret:
+		frappe.throw(_("A rotation is already waiting for this site's bench."))
+	row.pending_secret = secrets.token_hex(32)
+	row.save(ignore_permissions=True)
+	return {"pending": True}
+
+
+def _active_site(site: str, for_update: bool = False):
+	if not frappe.db.exists(SITE, site):
+		frappe.throw(_("No hosted site {0}.").format(site), frappe.DoesNotExistError)
+	row = frappe.get_doc(SITE, site, for_update=for_update)
+	if row.status == "Removed":
+		frappe.throw(_("Site {0} is removed.").format(site))
+	return row

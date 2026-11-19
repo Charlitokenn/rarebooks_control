@@ -52,6 +52,22 @@ class BooksHostedSite(Document):
 			frappe.throw(_("A hosted site needs its control secret."))
 		if not (self.site_url or "").startswith("https://"):
 			frappe.throw(_("The site URL must start with https://"))
+		# A ClickPesa payment always buys one year (spec 0008 AC-8, AC-14).
+		if self.provider == "ClickPesa" and self.billing_period != "Yearly":
+			frappe.throw(_("A ClickPesa site is billed yearly. Set the billing period to Yearly."))
+		if self.is_manual_edit():
+			self.validate_provider_reference()
+
+	def is_manual_edit(self) -> bool:
+		"""A save from desk or the API by a person. The control site's own writes (payments, pushes, rotation)
+		save with `ignore_permissions`, so they may set `provider_reference` on their own (spec 0008 AC-9)."""
+		return not self.is_new() and not self.flags.ignore_permissions
+
+	def validate_provider_reference(self):
+		"""`provider_reference` changes by hand only in the same save as a `provider` change (spec 0008 AC-14),
+		so an edit can't point a site at another PayPal subscription by mistake."""
+		if self.has_value_changed("provider_reference") and not self.has_value_changed("provider"):
+			frappe.throw(_("Change the provider reference only together with the provider."))
 
 	def before_save(self):
 		from rarebooks_control.push import mark_changed

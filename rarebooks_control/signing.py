@@ -16,12 +16,17 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import frappe
+from frappe import _
 from werkzeug.wrappers import Response
+
+from rarebooks_control.alerts import send_ops
 
 SIGNATURE_HEADER = "X-Books-Signature"
 SIGNATURE_PREFIX = "sha256="
 ISSUED_AT_WINDOW = timedelta(minutes=5)
 UNAUTHORIZED = 401
+# More than 20 failed checks in one hour sends one email (spec 0008 AC-22).
+SIGNATURE_FAILURE_ALERT_AT = 21
 
 
 def sign(body: bytes, secret: str | bytes) -> str:
@@ -55,8 +60,31 @@ def signed_response(body: dict, status: int, secret: str | bytes | None) -> Resp
 
 
 def unauthorized(secret: str | bytes | None = None) -> Response:
-	"""A 401 carries no detail (AC-5)."""
+	"""A 401 carries no detail (AC-5). Each one counts toward the signature failure alert (AC-22)."""
+	note_signature_failure()
 	return signed_response({}, UNAUTHORIZED, secret)
+
+
+def note_signature_failure():
+	"""Count a failed signature, checksum or verify check in this hour's counter. The email goes when the
+	count reaches exactly 21, so an hour of failures sends one alert, however many more follow (AC-22)."""
+	hour = utc_now().strftime("%Y%m%d%H")
+	cache_key = frappe.cache.make_key(f"sigfail:{hour}")
+	count = frappe.cache.incrby(cache_key, 1)
+	if count == 1:
+		frappe.cache.expire(cache_key, 2 * 60 * 60)
+	if count == SIGNATURE_FAILURE_ALERT_AT:
+		send_ops(
+			_("More than 20 failed signature checks this hour"),
+			[
+				_(
+					"Calls to the control site failed their signature or checksum check more than 20 times since {0}:00 UTC."
+				).format(utc_now().strftime("%Y-%m-%d %H")),
+				_(
+					"Check the webhook settings at ClickPesa and PayPal, and the secrets of the hosting benches."
+				),
+			],
+		)
 
 
 def utc_now() -> datetime:

@@ -1,0 +1,105 @@
+{
+ "app": "rarebooks_control",
+ "charts": [],
+ "content": "[{\"id\":\"billing-head\",\"type\":\"header\",\"data\":{\"text\":\"Billing\",\"col\":12}},{\"id\":\"failing\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Failing pushes\",\"col\":3}},{\"id\":\"sites\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Hosted Sites\",\"col\":3}},{\"id\":\"space-1\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"registry\",\"type\":\"card\",\"data\":{\"card_name\":\"Registry\",\"col\":4}},{\"id\":\"payments\",\"type\":\"card\",\"data\":{\"card_name\":\"Payments\",\"col\":4}}]",
+ "custom_blocks": [],
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "for_user": "",
+ "hide_custom": 0,
+ "icon": "wallet",
+ "is_hidden": 0,
+ "label": "Billing",
+ "links": [
+  {
+   "label": "Registry",
+   "link_count": 2,
+   "type": "Card Break"
+  },
+  {
+   "label": "Hosted Sites",
+   "link_to": "Books Hosted Site",
+   "link_type": "DocType",
+   "type": "Link",
+   "onboard": 0,
+   "is_query_report": 0
+  },
+  {
+   "label": "Hosting Benches",
+   "link_to": "Books Hosting Bench",
+   "link_type": "DocType",
+   "type": "Link",
+   "onboard": 0,
+   "is_query_report": 0
+  },
+  {
+   "label": "Payments",
+   "link_count": 3,
+   "type": "Card Break"
+  },
+  {
+   "label": "Plans",
+   "link_to": "Books Plan",
+   "link_type": "DocType",
+   "type": "Link",
+   "onboard": 0,
+   "is_query_report": 0
+  },
+  {
+   "label": "Checkouts",
+   "link_to": "Books Checkout",
+   "link_type": "DocType",
+   "type": "Link",
+   "onboard": 0,
+   "is_query_report": 0
+  },
+  {
+   "label": "Payment Events",
+   "link_to": "Books Payment Event",
+   "link_type": "DocType",
+   "type": "Link",
+   "onboard": 0,
+   "is_query_report": 0
+  }
+ ],
+ "modified": "2026-11-19 06:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Rarebooks Control",
+ "name": "Billing",
+ "number_cards": [],
+ "owner": "Administrator",
+ "parent_page": "",
+ "public": 1,
+ "quick_lists": [],
+ "roles": [
+  {
+   "role": "Billing Manager"
+  },
+  {
+   "role": "Removal Manager"
+  },
+  {
+   "role": "System Manager"
+  }
+ ],
+ "sequence_id": 1.0,
+ "shortcuts": [
+  {
+   "color": "Red",
+   "doc_view": "List",
+   "label": "Failing pushes",
+   "link_to": "Books Hosted Site",
+   "type": "DocType",
+   "stats_filter": "[[\"Books Hosted Site\",\"push_status\",\"=\",\"Failing\"]]",
+   "format": "{} failing"
+  },
+  {
+   "color": "Grey",
+   "doc_view": "List",
+   "label": "Hosted Sites",
+   "link_to": "Books Hosted Site",
+   "type": "DocType"
+  }
+ ],
+ "title": "Billing"
+}

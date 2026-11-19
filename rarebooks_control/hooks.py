@@ -10,6 +10,9 @@ require_type_annotated_api_methods = True
 # Frappe writes the typing block into each DocType controller on save (developer mode).
 export_python_type_annotations = True
 
+# Spec 0008 AC-20: two factor sign in for every desk user.
+after_install = "rarebooks_control.install.after_install"
+
 scheduler_events = {
 	"cron": {
 		# Spec 0008 AC-13: pushes that are pending, or failing and due.

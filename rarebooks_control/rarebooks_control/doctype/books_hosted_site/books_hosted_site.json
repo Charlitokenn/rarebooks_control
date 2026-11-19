@@ -1,7 +1,7 @@
 {
  "actions": [],
  "allow_bulk_edit": 1,
- "allow_rename": 1,
+ "allow_rename": 0,
  "autoname": "field:site",
  "creation": "2026-11-18 21:06:35.440608",
  "doctype": "DocType",
@@ -88,6 +88,7 @@
    "fieldname": "status",
    "fieldtype": "Select",
    "in_list_view": 1,
+   "in_standard_filter": 1,
    "label": "Status",
    "options": "Active\nRemoved",
    "read_only": 1,
@@ -115,6 +116,8 @@
   {
    "fieldname": "provider",
    "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
    "label": "Provider",
    "options": "\nClickPesa\nPayPal",
    "permlevel": 1
@@ -207,6 +210,7 @@
    "fieldname": "push_status",
    "fieldtype": "Select",
    "in_list_view": 1,
+   "in_standard_filter": 1,
    "label": "Push Status",
    "options": "Synced\nPending\nFailing",
    "read_only": 1,
@@ -299,7 +303,7 @@
  "index_web_pages_for_search": 1,
  "link_display_mode": "Search",
  "links": [],
- "modified": "2026-11-18 21:06:44.498113",
+ "modified": "2026-11-19 06:00:00.000000",
  "modified_by": "Administrator",
  "module": "Rarebooks Control",
  "name": "Books Hosted Site",

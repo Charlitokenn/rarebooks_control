@@ -30,7 +30,7 @@ def clickpesa() -> Response:
 		return answer("rate_limited", 429)
 	raw, body = signing.read_body()
 	if body is None or not clickpesa_api.is_valid_checksum(body):
-		return answer("unauthorized", UNAUTHORIZED)
+		return unauthorized()
 	data, event_type = body.get("data"), body.get("event")
 	payment_id = data.get("id") if isinstance(data, dict) else None
 	order = data.get("orderReference") if isinstance(data, dict) else None
@@ -76,14 +76,14 @@ def paypal() -> Response:
 		return answer("rate_limited", 429)
 	raw, body = signing.read_body()
 	if body is None:
-		return answer("unauthorized", UNAUTHORIZED)
+		return unauthorized()
 	try:
 		verified = paypal_api.is_verified_webhook(frappe.request.headers, raw)
 	except paypal_api.PayPalError as error:
 		frappe.log_error("PayPal: webhook verify call failed", str(error))
 		return answer("provider_unavailable", UNAVAILABLE)
 	if not verified:
-		return answer("unauthorized", UNAUTHORIZED)
+		return unauthorized()
 
 	event_id, event_type, resource = body.get("id"), body.get("event_type"), body.get("resource")
 	if not isinstance(event_id, str) or not isinstance(event_type, str) or not isinstance(resource, dict):
@@ -146,6 +146,12 @@ def paypal_refund(event, resource: dict) -> str:
 
 def _site_of(value) -> str | None:
 	return value if isinstance(value, str) and frappe.db.exists("Books Hosted Site", value) else None
+
+
+def unauthorized() -> Response:
+	"""A checksum or verify failure: counted for the hourly signature failure alert (spec 0008 AC-22)."""
+	signing.note_signature_failure()
+	return answer("unauthorized", UNAUTHORIZED)
 
 
 def answer(result: str, status: int = 200) -> Response:
