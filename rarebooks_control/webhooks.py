@@ -1,4 +1,4 @@
-"""Provider webhooks (spec 0008 AC-7). A webhook only says "go and look": its body is checked, stored and
+"""Provider webhooks (spec 0008 AC-7, AC-9). A webhook only says "go and look": its body is checked, stored and
 deduplicated, and then `billing.confirm_*` asks the provider for the truth."""
 
 import frappe
@@ -8,10 +8,22 @@ from werkzeug.wrappers import Response
 
 from rarebooks_control import billing, signing
 from rarebooks_control.providers import clickpesa as clickpesa_api
+from rarebooks_control.providers import paypal as paypal_api
 from rarebooks_control.signing import utc_now
 
 EVENT = "Books Payment Event"
 UNAUTHORIZED, BAD_REQUEST, UNAVAILABLE = 401, 400, 503
+# Events that name a subscription to go and read (spec 0008, Provider calls).
+SUBSCRIPTION_EVENTS = (
+	"BILLING.SUBSCRIPTION.ACTIVATED",
+	"BILLING.SUBSCRIPTION.UPDATED",
+	"BILLING.SUBSCRIPTION.CANCELLED",
+	"BILLING.SUBSCRIPTION.SUSPENDED",
+	"BILLING.SUBSCRIPTION.EXPIRED",
+)
+SALE_COMPLETED = "PAYMENT.SALE.COMPLETED"
+PAYMENT_FAILED = "BILLING.SUBSCRIPTION.PAYMENT.FAILED"
+REFUND_EVENTS = ("PAYMENT.SALE.REFUNDED", "PAYMENT.SALE.REVERSED")
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -55,6 +67,85 @@ def clickpesa() -> Response:
 		frappe.log_error("ClickPesa: payment status query failed", str(error))
 		return answer("provider_unavailable", UNAVAILABLE)
 	return answer(outcome.lower())
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+@rate_limit(limit=300, seconds=60)
+def paypal() -> Response:
+	"""PayPal's verify call decides whether the delivery is genuine; the subscription read decides what it
+	means (AC-9). A 503 makes PayPal deliver it again."""
+	raw, body = signing.read_body()
+	if body is None:
+		return answer("unauthorized", UNAUTHORIZED)
+	try:
+		verified = paypal_api.is_verified_webhook(frappe.request.headers, raw)
+	except paypal_api.PayPalError as error:
+		frappe.log_error("PayPal: webhook verify call failed", str(error))
+		return answer("provider_unavailable", UNAVAILABLE)
+	if not verified:
+		return answer("unauthorized", UNAUTHORIZED)
+
+	event_id, event_type, resource = body.get("id"), body.get("event_type"), body.get("resource")
+	if not isinstance(event_id, str) or not isinstance(event_type, str) or not isinstance(resource, dict):
+		return answer("bad_request", BAD_REQUEST)
+	event = frappe.db.get_value(EVENT, {"event_id": event_id}, ["name", "outcome"], as_dict=True)
+	if event and event.outcome:
+		return answer("duplicate")
+	if not event:
+		try:
+			event = store_event(event_id, "PayPal", event_type, raw)
+		except frappe.DuplicateEntryError:
+			frappe.db.rollback()
+			return answer("busy", UNAVAILABLE)
+	doc = frappe.get_doc(EVENT, event.name)
+
+	if event_type in REFUND_EVENTS:
+		return answer(paypal_refund(doc, resource).lower())
+	if event_type == SALE_COMPLETED:
+		subscription_id = resource.get("billing_agreement_id")
+	elif event_type in SUBSCRIPTION_EVENTS:
+		subscription_id = resource.get("id")
+	else:
+		# PAYMENT.FAILED is kept for the daily digest and changes nothing; other types are noise.
+		doc.site = _site_of(resource.get("custom_id"))
+		return answer(billing.finish(doc, "Ignored").lower())
+	if not isinstance(subscription_id, str) or not subscription_id:
+		return answer(billing.finish(doc, "Ignored").lower())
+
+	try:
+		outcome = billing.confirm_paypal(subscription_id, event.name)
+	except paypal_api.PayPalError as error:
+		frappe.db.rollback()
+		frappe.log_error("PayPal: subscription read failed", str(error))
+		return answer("provider_unavailable", UNAVAILABLE)
+	return answer(outcome.lower())
+
+
+def paypal_refund(event, resource: dict) -> str:
+	"""A refund or reversal is kept and sent to ops, and changes no state (AC-10): only a manual edit can
+	move `paid_until` earlier."""
+	subscription_id = resource.get("billing_agreement_id")
+	checkout = None
+	if isinstance(subscription_id, str) and subscription_id:
+		name = frappe.db.get_value("Books Checkout", {"paypal_subscription_id": subscription_id}, "name")
+		checkout = frappe.get_doc("Books Checkout", name) if name else None
+	amount = resource.get("amount") or {}
+	event.site = checkout.site if checkout else None
+	event.checkout = checkout.name if checkout else None
+	event.amount = billing.decimal_amount(amount.get("total") or amount.get("value"))
+	event.currency = amount.get("currency") or amount.get("currency_code")
+	billing.alert_paypal_ops(
+		_("PayPal {0} for {1}").format(event.event_type, event.site or _("an unknown site")),
+		_(
+			"Nothing was changed. Settle it with a manual edit of the site if access should end. Sale {0}, {1} {2}."
+		).format(resource.get("sale_id") or resource.get("id"), event.amount, event.currency),
+		checkout,
+	)
+	return billing.finish(event, "Refund")
+
+
+def _site_of(value) -> str | None:
+	return value if isinstance(value, str) and frappe.db.exists("Books Hosted Site", value) else None
 
 
 def store_event(event_id: str, provider: str, event_type: str, raw: bytes):

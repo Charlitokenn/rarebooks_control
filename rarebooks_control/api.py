@@ -15,7 +15,9 @@ from frappe.utils import getdate, now_datetime, validate_email_address
 from werkzeug.wrappers import Response
 
 from rarebooks_control import billing, signing
+from rarebooks_control.providers import paypal
 from rarebooks_control.providers.clickpesa import ClickPesaError
+from rarebooks_control.providers.paypal import PayPalError
 from rarebooks_control.rarebooks_control.doctype.books_plan.books_plan import CURRENCY_STEP
 from rarebooks_control.state import site_state
 
@@ -98,6 +100,14 @@ def create_checkout() -> Response:
 	plan = plan_for(row, provider, period)
 	if not plan:
 		return request.answer({"refusal": "plan_not_offered"}, CONFLICT)
+	try:
+		subscribed = _has_live_subscription(row)
+	except PayPalError as error:
+		frappe.db.rollback()
+		frappe.log_error("Billing: create_checkout could not ask PayPal about the subscription", str(error))
+		return request.answer({}, PROVIDER_FAILED)
+	if subscribed:
+		return request.answer({"refusal": "already_subscribed"}, CONFLICT)
 
 	token = secrets.token_urlsafe(32)
 	reused = _reusable_checkout(row.name, plan.name)
@@ -107,11 +117,20 @@ def create_checkout() -> Response:
 	else:
 		try:
 			billing.new_checkout(row, plan, return_url, token_hash(token))
-		except (ClickPesaError, NotImplementedError) as error:
+		except (ClickPesaError, PayPalError) as error:
 			frappe.db.rollback()
 			frappe.log_error("Billing: create_checkout could not reach the provider", str(error))
 			return request.answer({}, PROVIDER_FAILED)
 	return request.answer({"checkout_url": billing.go_url(token)})
+
+
+def _has_live_subscription(row) -> bool:
+	"""The site's current PayPal subscription is `ACTIVE` or `APPROVED` at PayPal, read live (AC-5).
+	Refused for either provider, so a PayPal subscriber can't also pay a ClickPesa year by mistake."""
+	if row.provider != "PayPal" or not row.provider_reference:
+		return False
+	subscription = paypal.get_subscription(row.provider_reference)
+	return bool(subscription) and subscription.get("status") in paypal.LIVE_STATUSES
 
 
 def offered_plans(row) -> list[dict]:
