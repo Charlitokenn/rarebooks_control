@@ -167,6 +167,29 @@ class IntegrationTestTwoFactor(IntegrationTestCase):
 		super().setUpClass()
 		make_role_users()
 
+	def test_install_turns_on_two_factor_before_the_setup_wizard(self):
+		# covers: AC-20 (a new Frappe Cloud site installs the app while language and time_zone are still empty)
+		before = (
+			frappe.db.get_single_value("System Settings", "language"),
+			frappe.db.get_single_value("System Settings", "time_zone"),
+		)
+		two_factor = frappe.db.get_single_value("System Settings", "enable_two_factor_auth")
+		all_role = frappe.db.get_value("Role", "All", "two_factor_auth")
+		try:
+			frappe.db.set_single_value("System Settings", {"language": None, "time_zone": None})
+			enable_two_factor_auth()
+			self.assertEqual(frappe.db.get_single_value("System Settings", "enable_two_factor_auth"), 1)
+			self.assertEqual(frappe.db.get_value("Role", "All", "two_factor_auth"), 1)
+		finally:
+			frappe.db.set_single_value(
+				"System Settings",
+				{"language": before[0], "time_zone": before[1], "enable_two_factor_auth": two_factor},
+			)
+			frappe.db.set_value("Role", "All", "two_factor_auth", all_role)
+			from frappe.core.doctype.system_settings.system_settings import clear_system_settings_cache
+
+			clear_system_settings_cache()
+
 	def test_install_turns_on_two_factor_for_every_user(self):
 		# covers: AC-20
 		settings = frappe.get_single("System Settings")
