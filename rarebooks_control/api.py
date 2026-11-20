@@ -1,4 +1,5 @@
-"""Signed endpoints for hosting benches and customer sites (spec 0008 AC-1 to AC-5).
+"""Signed endpoints for customer sites (spec 0008 AC-2 to AC-5). Sites are registered from desk through the
+Frappe Cloud API (`registry.py`, spec 0010 AC-10), no longer by a signed call.
 
 Each one reads the raw body, checks the signature and `issued_at` first, and answers through
 `signing.signed_response`, never `frappe.throw` or Frappe's `{"message": ...}` wrapper.
@@ -11,11 +12,10 @@ from decimal import ROUND_HALF_UP, Decimal
 from urllib.parse import urlsplit
 
 import frappe
-from frappe.utils import getdate, now_datetime, validate_email_address
+from frappe.utils import getdate, now_datetime
 from werkzeug.wrappers import Response
 
 from rarebooks_control import billing, removal, signing
-from rarebooks_control.destinations import public_destination
 from rarebooks_control.providers import paypal
 from rarebooks_control.providers.clickpesa import ClickPesaError
 from rarebooks_control.providers.paypal import PayPalError
@@ -29,51 +29,8 @@ BILLING_PERIODS = ("Monthly", "Yearly")
 FACTS = ("trial_ends_on", "time_zone", "language", "company_name")
 FACT_LENGTH = 140
 REUSE_WINDOW = timedelta(hours=24)
-REGISTER_LIMIT, GET_STATE_LIMIT, CHECKOUT_LIMIT = 30, 30, 10
+GET_STATE_LIMIT, CHECKOUT_LIMIT = 30, 10
 CONFLICT, BAD_REQUEST, TOO_MANY, PROVIDER_FAILED = 409, 400, 429, 502
-
-
-@frappe.whitelist(allow_guest=True, methods=["POST"])
-def register_site() -> Response:
-	"""A hosting bench registers one of its sites and gets its secret back (AC-1). Safe to repeat."""
-	raw, body = signing.read_body()
-	bench = body.get("bench") if body else None
-	secret = signing.runner_secret(bench)
-	request = signing.verify_request(raw, body, [secret])
-	if not request:
-		return signing.unauthorized(secret)
-	if signing.over_limit("register_site", bench, REGISTER_LIMIT):
-		return request.answer({}, TOO_MANY)
-
-	site, site_url, owner_email = body.get("site"), body.get("site_url"), body.get("owner_email")
-	if not _is_site_name(site) or not public_destination(site_url) or not _is_email(owner_email):
-		return request.answer({}, BAD_REQUEST)
-
-	echo = {"site": site, "issued_at": request.issued_at}
-	existing = frappe.db.get_value(SITE, site, ["hosting_bench", "status"], as_dict=True, for_update=True)
-	if existing:
-		return _registered(request, echo, existing, bench, site)
-
-	_ensure_bench(bench)
-	site_secret = secrets.token_hex(32)
-	try:
-		frappe.get_doc(
-			{
-				"doctype": SITE,
-				"site": site,
-				"site_url": site_url.rstrip("/"),
-				"hosting_bench": bench,
-				"owner_email": owner_email,
-				"control_secret": site_secret,
-			}
-		).insert(ignore_permissions=True)
-	except frappe.DuplicateEntryError:
-		existing = frappe.db.get_value(SITE, site, ["hosting_bench", "status"], as_dict=True, for_update=True)
-		if not existing:
-			raise
-		return _registered(request, echo, existing, bench, site)
-
-	return request.answer({**echo, "secret": site_secret})
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -83,6 +40,9 @@ def get_state() -> Response:
 	if not isinstance(verified, tuple):
 		return verified
 	request, row = verified
+	if row.config_status != "Active":
+		# Spec 0011 AC-5: setup isn't finished, which is no signature failure. Signed with the verifying secret.
+		return request.answer({"refusal": "config_pending"}, CONFLICT)
 	_store_facts(row, request.body)
 	state = {**site_state(row), "issued_at": request.issued_at}
 	return request.answer({"state": state, "plans": offered_plans(row)})
@@ -139,13 +99,6 @@ def _has_live_subscription(row) -> bool:
 		return False
 	subscription = paypal.get_subscription(row.provider_reference)
 	return bool(subscription) and subscription.get("status") in paypal.LIVE_STATUSES
-
-
-def _registered(request, echo, existing, bench, site):
-	if existing.hosting_bench != bench or existing.status == "Removed":
-		return request.answer(echo, CONFLICT)
-	row = frappe.get_doc(SITE, site)
-	return request.answer({**echo, "secret": row.get_password("control_secret")})
 
 
 def offered_plans(row) -> list[dict]:
@@ -251,26 +204,11 @@ def _reusable_checkout(site: str, plan) -> str | None:
 	)
 
 
-def _ensure_bench(bench: str):
-	if not frappe.db.exists("Books Hosting Bench", bench):
-		frappe.get_doc({"doctype": "Books Hosting Bench", "bench_name": bench}).insert(
-			ignore_permissions=True, ignore_if_duplicate=True
-		)
-
-
-def _is_site_name(value) -> bool:
-	return isinstance(value, str) and 0 < len(value) <= FACT_LENGTH and "/" not in value
-
-
 def _is_https(value) -> bool:
 	try:
 		return isinstance(value, str) and value.startswith("https://") and bool(urlsplit(value).hostname)
 	except ValueError:
 		return False
-
-
-def _is_email(value) -> bool:
-	return isinstance(value, str) and bool(validate_email_address(value))
 
 
 def _is_return_url(value, row) -> bool:

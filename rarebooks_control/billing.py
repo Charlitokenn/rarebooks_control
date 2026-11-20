@@ -6,7 +6,6 @@ disagree, and nothing changes from a webhook body alone.
 """
 
 import json
-import secrets
 from datetime import UTC, timedelta
 from decimal import Decimal, InvalidOperation
 
@@ -708,20 +707,6 @@ def push_now(site: str) -> dict:
 	row = _active_site(site)
 	push.queue_push(row.name)
 	return {"queued": True}
-
-
-@frappe.whitelist(methods=["POST"])
-def rotate_secret(site: str) -> dict:
-	"""Start a rotation: a new `pending_secret`, carried to the site by its bench's next `report_sites`
-	(spec 0008 AC-15). Both secrets are accepted until the bench calls `secret_rotated`. The secret is never
-	shown or returned here. Billing Manager only (AC-20)."""
-	frappe.only_for(BILLING_MANAGER)
-	row = _active_site(site, for_update=True)
-	if row.pending_secret:
-		frappe.throw(_("A rotation is already waiting for this site's bench."))
-	row.pending_secret = secrets.token_hex(32)
-	row.save(ignore_permissions=True)
-	return {"pending": True}
 
 
 def _active_site(site: str, for_update: bool = False):

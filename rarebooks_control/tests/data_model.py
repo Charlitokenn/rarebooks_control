@@ -1,4 +1,4 @@
-"""Test helpers for spec 0008's data model: users with one role each, and registry rows."""
+"""Test helpers for the data model: users with one role each, and registry rows (specs 0008, 0010)."""
 
 import secrets
 
@@ -12,7 +12,6 @@ ROLE_USERS = {
 	"Removal Manager": REMOVAL_MANAGER,
 	"System Manager": SYSTEM_MANAGER,
 }
-BENCH = "bench-test-1"
 
 
 def make_role_users():
@@ -27,20 +26,15 @@ def make_role_users():
 		user.insert(ignore_permissions=True)
 
 
-def make_bench(name: str = BENCH) -> str:
-	if not frappe.db.exists("Books Hosting Bench", name):
-		frappe.get_doc({"doctype": "Books Hosting Bench", "bench_name": name}).insert(ignore_permissions=True)
-	return name
-
-
 def make_site(site: str, secret: str | None = None, **values):
-	"""A registry row as `register_site` will make it (spec 0008 AC-1)."""
+	"""A registry row whose config a verified ping has made Active (spec 0010 AC-11), unless `values` say
+	otherwise."""
 	doc = frappe.get_doc(
 		{
 			"doctype": "Books Hosted Site",
 			"site": site,
 			"site_url": f"https://{site}",
-			"hosting_bench": make_bench(),
+			"config_status": "Active",
 			"owner_email": "owner@example.com",
 			"control_secret": secrets.token_hex(32) if secret is None else secret,
 			**values,

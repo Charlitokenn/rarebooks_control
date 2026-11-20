@@ -11,7 +11,6 @@ from frappe.utils import set_request
 from rarebooks_control.providers import clickpesa
 from rarebooks_control.signing import SIGNATURE_HEADER, is_valid_signature, sign, utc_now
 
-RUNNER_SECRET = "runner-test-secret-0123456789abcdef0123456789abcdef"
 CHECKSUM_KEY = "clickpesa-test-checksum-key"
 CLICKPESA_LINK = "https://checkout.clickpesa.com/pay/abc"
 
@@ -48,12 +47,6 @@ def answer(response, secret: str | None = None) -> dict:
 	data = json.loads(response.get_data())
 	assert "message" not in data, "a signed answer must not be wrapped"
 	return data
-
-
-@contextmanager
-def runner_config(bench: str):
-	with patch.dict(frappe.conf, {"books_runner_secrets": {bench: RUNNER_SECRET}}):
-		yield
 
 
 @contextmanager
@@ -152,3 +145,110 @@ class CustomerStub:
 			return FakeResponse(401, {})
 		self.pushes.append(json.loads(data))
 		return FakeResponse(self.status, {"message": {"result": self.result}})
+
+
+class SiteResponse:
+	"""What `destinations.post` gives back: status, raw bytes and headers."""
+
+	def __init__(self, status_code: int, body: dict, secret: str | None):
+		self.status_code = status_code
+		self.content = json.dumps(body, separators=(",", ":")).encode()
+		self.headers = {SIGNATURE_HEADER: sign(self.content, secret)} if secret else {}
+
+
+class SiteStub:
+	"""Stands in for customer sites' signed endpoints in `frappe_books.subscription` (spec 0010 AC-2).
+
+	Each site holds one secret (`secrets[site]`), as its `books_control_secret` would. A call signed with
+	another secret gets a 401 signed with the held one. `reports[site]` is the `removal_status()` answered.
+	"""
+
+	def __init__(self):
+		self.secrets: dict[str, str] = {}
+		self.reports: dict[str, dict] = {}
+		self.calls: list[tuple[str, str, dict]] = []
+		self.down: set[str] = set()
+		self.answers: dict[str, tuple[int, dict]] = {}
+
+	def hold(self, row, secret: str | None = None):
+		self.secrets[row.name] = secret or row.get_password("control_secret")
+
+	def names(self, site: str | None = None) -> list[str]:
+		return [name for called, name, _body in self.calls if site in (None, called)]
+
+	def bodies(self, name: str) -> list[dict]:
+		return [body for _site, called, body in self.calls if called == name]
+
+	def __call__(self, url, data, headers, timeout):
+		import requests
+
+		site = url.split("://", 1)[1].split("/", 1)[0]
+		name = url.rsplit(".", 1)[1]
+		assert url.endswith(f"/api/method/frappe_books.subscription.{name}")
+		body = json.loads(data)
+		if name in self.down or site in self.down:
+			raise requests.ConnectionError("down")
+		secret = self.secrets.get(site)
+		echo = {"issued_at": body.get("issued_at")}
+		if not is_valid_signature(data, headers.get(SIGNATURE_HEADER), secret) or body.get("site") != site:
+			return SiteResponse(401, echo, secret)
+		self.calls.append((site, name, body))
+		if name in self.answers:
+			status, answer = self.answers[name]
+			return SiteResponse(status, {**answer, **echo}, secret)
+		if name == "removal_report":
+			return SiteResponse(200, {**self.reports[site], **echo}, secret)
+		if name == "control_ping":
+			return SiteResponse(200, {"site": site, "status": "ok", **echo}, secret)
+		status = {"start_export": "queued", "mark_export_sent": "marked", "clear_removal": "cleared"}[name]
+		return SiteResponse(200, {"status": status, **echo}, secret)
+
+
+class FakeFrappeCloud:
+	"""Stands in for `providers.frappe_cloud`: a team's sites by name, every call recorded, and an exception to
+	raise per method (spec 0010 AC-13)."""
+
+	GROUP = "books-group"
+
+	def __init__(self):
+		self.sites: dict[str, dict] = {}
+		self.calls: list[tuple] = []
+		self.errors: dict[str, Exception] = {}
+		self.configs: dict[str, dict] = {}
+
+	def add(self, name: str, status: str = "Active", group: str | None = GROUP):
+		self.sites[name] = {"name": name, "status": status, "group": group}
+
+	def patch(self):
+		from rarebooks_control.providers import frappe_cloud
+
+		return patch.multiple(
+			frappe_cloud, get_site=self.get_site, update_config=self.update_config, archive=self.archive
+		)
+
+	def _maybe_raise(self, method: str):
+		error = self.errors.get(method)
+		if error:
+			raise error
+
+	def get_site(self, name):
+		self.calls.append(("get", name))
+		self._maybe_raise("get")
+		if name not in self.sites:
+			from rarebooks_control.providers.frappe_cloud import FrappeCloudError
+
+			raise FrappeCloudError("press.api.site.get answered HTTP 404")
+		return dict(self.sites[name])
+
+	def update_config(self, name, config):
+		self.calls.append(("update_config", name))
+		self._maybe_raise("update_config")
+		self.configs[name] = dict(config)
+
+	def archive(self, name):
+		self.calls.append(("archive", name))
+		self._maybe_raise("archive")
+		self.sites[name]["status"] = "Pending"
+
+	def archives(self) -> int:
+		return sum(1 for call in self.calls if call[0] == "archive")

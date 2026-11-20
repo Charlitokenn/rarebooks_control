@@ -1,5 +1,5 @@
-"""Spec 0008 signed endpoints: `register_site` (AC-1), `get_state` (AC-2), `create_checkout` (AC-3, AC-5)
-and the `go` link (AC-6)."""
+"""Spec 0008 signed endpoints: `get_state` (AC-2, and spec 0011 AC-5's config refusal), `create_checkout`
+(AC-3, AC-5) and the `go` link (AC-6). Registration moved to `registry.py` (spec 0010 AC-10)."""
 
 import hashlib
 from datetime import datetime, timedelta
@@ -13,29 +13,16 @@ from rarebooks_control import api, billing
 from rarebooks_control.providers.clickpesa import ClickPesaError
 from rarebooks_control.tests.control import (
 	CLICKPESA_LINK,
-	RUNNER_SECRET,
 	answer,
 	call,
 	get,
 	issued,
 	make_plan,
 	reset_billing,
-	runner_config,
 )
-from rarebooks_control.tests.data_model import BENCH, make_bench, make_site
+from rarebooks_control.tests.data_model import make_site
 
 SITE = "Books Hosted Site"
-
-
-def register_body(site="new.rarebooks.app", **values):
-	return {
-		"bench": BENCH,
-		"issued_at": issued(),
-		"site": site,
-		"site_url": f"https://{site}/",
-		"owner_email": "owner@example.com",
-		**values,
-	}
 
 
 def site_body(site, **values):
@@ -58,78 +45,6 @@ def checkout_body(site, **values):
 		**values,
 	}
 	return site_body(site, **values)
-
-
-class IntegrationTestRegisterSite(IntegrationTestCase):
-	def setUp(self):
-		dns = patch(
-			"rarebooks_control.destinations.socket.getaddrinfo",
-			return_value=[(2, 1, 6, "", ("8.8.8.8", 443))],
-		)
-		dns.start()
-		self.addCleanup(dns.stop)
-		reset_billing()
-		make_bench()
-
-	def test_registers_a_new_site_with_a_fresh_secret(self):
-		# covers: AC-1
-		body = register_body("one.rarebooks.app")
-		with runner_config(BENCH):
-			response = call(api.register_site, body, RUNNER_SECRET)
-		data = answer(response, RUNNER_SECRET)
-		self.assertEqual(response.status_code, 200)
-		self.assertEqual(data["issued_at"], body["issued_at"])
-		self.assertRegex(data["secret"], r"^[0-9a-f]{64}$")
-		row = frappe.get_doc(SITE, "one.rarebooks.app")
-		self.assertEqual(row.get_password("control_secret"), data["secret"])
-		self.assertEqual((row.site_url, row.hosting_bench), ("https://one.rarebooks.app", BENCH))
-
-	def test_again_from_the_same_bench_returns_the_same_secret_and_changes_nothing(self):
-		# covers: AC-1
-		with runner_config(BENCH):
-			first = answer(call(api.register_site, register_body("two.rarebooks.app"), RUNNER_SECRET))
-			again = call(
-				api.register_site,
-				register_body("two.rarebooks.app", owner_email="other@example.com"),
-				RUNNER_SECRET,
-			)
-		self.assertEqual(answer(again, RUNNER_SECRET)["secret"], first["secret"])
-		self.assertEqual(frappe.db.get_value(SITE, "two.rarebooks.app", "owner_email"), "owner@example.com")
-
-	def test_another_bench_or_a_removed_site_gets_409(self):
-		# covers: AC-1
-		make_site("taken.rarebooks.app", hosting_bench=make_bench("bench-other"))
-		make_site("gone.rarebooks.app", status="Removed")
-		for site in ("taken.rarebooks.app", "gone.rarebooks.app"):
-			with self.subTest(site=site), runner_config(BENCH):
-				response = call(api.register_site, register_body(site), RUNNER_SECRET)
-				self.assertEqual(response.status_code, 409)
-				self.assertNotIn("secret", answer(response, RUNNER_SECRET))
-
-	def test_bad_signature_unknown_bench_or_stale_time_gets_401(self):
-		# covers: AC-1
-		cases = {
-			"bad signature": (register_body("x1.rarebooks.app"), "wrong-secret"),
-			"unknown bench": (register_body("x2.rarebooks.app", bench="nobody"), RUNNER_SECRET),
-			"stale": (
-				register_body("x3.rarebooks.app", issued_at=issued(timedelta(minutes=-6))),
-				RUNNER_SECRET,
-			),
-		}
-		for name, (body, secret) in cases.items():
-			with self.subTest(name), runner_config(BENCH):
-				response = call(api.register_site, body, secret)
-				self.assertEqual((response.status_code, response.get_data()), (401, b"{}"))
-				self.assertFalse(frappe.db.exists(SITE, body["site"]))
-
-	def test_bad_url_or_email_gets_400(self):
-		# covers: AC-1
-		for values in ({"site_url": "http://plain.rarebooks.app"}, {"owner_email": "not-an-email"}):
-			with self.subTest(**values), runner_config(BENCH):
-				response = call(
-					api.register_site, register_body("bad.rarebooks.app", **values), RUNNER_SECRET
-				)
-				self.assertEqual(response.status_code, 400)
 
 
 class IntegrationTestGetState(IntegrationTestCase):
@@ -217,6 +132,21 @@ class IntegrationTestGetState(IntegrationTestCase):
 			with self.subTest(name):
 				response = call(api.get_state, body, key)
 				self.assertEqual((response.status_code, response.get_data()), (401, b"{}"))
+
+	def test_a_site_whose_config_isnt_active_gets_a_signed_409_that_isnt_a_signature_failure(self):
+		# covers: spec 0011 AC-5
+		for config_status in ("Pending", "Failed"):
+			with self.subTest(config_status):
+				row = make_site(f"{config_status.lower()}.rarebooks.app", config_status=config_status)
+				secret = row.get_password("control_secret")
+				with patch("rarebooks_control.signing.note_signature_failure") as noted:
+					response = call(api.get_state, site_body(row.name), secret)
+				self.assertEqual(response.status_code, 409)
+				self.assertEqual(answer(response, secret), {"refusal": "config_pending"})
+				noted.assert_not_called()
+				self.assertIsNone(frappe.db.get_value(SITE, row.name, "company_name"), "no fact is stored")
+				# Without a valid secret it is still a 401.
+				self.assertEqual(call(api.get_state, site_body(row.name), "wrong").status_code, 401)
 
 	def test_31st_call_in_a_minute_for_one_site_is_refused(self):
 		# covers: AC-22 (per site, not per IP: every site calls from the hosting server's one IP)

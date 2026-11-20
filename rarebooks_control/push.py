@@ -52,7 +52,9 @@ def push_site(site: str):
 	Only the push fields are written, so a push can never put back an older billing value.
 	"""
 	row = frappe.get_doc("Books Hosted Site", site, for_update=True)
-	if row.status == "Removed":
+	# Spec 0010 AC-11: a site whose config isn't Active may not hold this secret yet; it stays Pending here and
+	# the sweep sends it once its ping makes it Active.
+	if row.status == "Removed" or row.config_status != "Active":
 		return
 	version = row.state_version or 0
 	body = dumps({"site": row.site, "issued_at": issued_now(), **site_state(row)})
@@ -154,11 +156,18 @@ def sweep():
 	"""
 	now = utc_now()
 	pending = frappe.get_all(
-		"Books Hosted Site", filters={"status": "Active", "push_status": "Pending"}, pluck="name"
+		"Books Hosted Site",
+		filters={"status": "Active", "config_status": "Active", "push_status": "Pending"},
+		pluck="name",
 	)
 	due = frappe.get_all(
 		"Books Hosted Site",
-		filters={"status": "Active", "push_status": "Failing", "next_push_on": ("<=", now)},
+		filters={
+			"status": "Active",
+			"config_status": "Active",
+			"push_status": "Failing",
+			"next_push_on": ("<=", now),
+		},
 		pluck="name",
 	)
 	for site in (*pending, *due):

@@ -10,11 +10,15 @@
  "field_order": [
   "site",
   "site_url",
-  "hosting_bench",
   "owner_email",
   "column_break_site",
   "status",
   "removed_on",
+  "section_break_config",
+  "config_status",
+  "config_sent_on",
+  "column_break_config",
+  "rotation_started_on",
   "section_break_billing",
   "paid_until",
   "provider",
@@ -65,14 +69,6 @@
    "reqd": 1
   },
   {
-   "fieldname": "hosting_bench",
-   "fieldtype": "Link",
-   "label": "Hosting Bench",
-   "options": "Books Hosting Bench",
-   "read_only": 1,
-   "reqd": 1
-  },
-  {
    "fieldname": "owner_email",
    "fieldtype": "Data",
    "label": "Owner Email",
@@ -99,6 +95,39 @@
    "fieldname": "removed_on",
    "fieldtype": "Datetime",
    "label": "Removed On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_config",
+   "fieldtype": "Section Break",
+   "label": "Config"
+  },
+  {
+   "default": "Pending",
+   "description": "Active once the site answers a signed ping with its new secret (spec 0010 AC-11).",
+   "fieldname": "config_status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Config Status",
+   "options": "Pending\nActive\nFailed",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "config_sent_on",
+   "fieldtype": "Datetime",
+   "label": "Config Sent On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_config",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "rotation_started_on",
+   "fieldtype": "Datetime",
+   "label": "Rotation Started On",
    "read_only": 1
   },
   {
@@ -303,7 +332,7 @@
  "index_web_pages_for_search": 1,
  "link_display_mode": "Search",
  "links": [],
- "modified": "2026-11-19 06:00:00.000000",
+ "modified": "2026-11-20 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Rarebooks Control",
  "name": "Books Hosted Site",

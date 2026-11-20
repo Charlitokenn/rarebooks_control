@@ -17,13 +17,15 @@ from rarebooks_control.billing import receipt_language
 from rarebooks_control.signing import utc_now
 
 CASE = "Books Removal Case"
-BENCH = "Books Hosting Bench"
+SITE = "Books Hosted Site"
+SETTINGS = "Books Removal Settings"
 BRAND_NAME = "RareBooks"
 SUBSCRIPTION_PATH = "/books/subscription"
 LINK_DAYS = 30
-BENCH_SILENT = timedelta(hours=3)
+# Spec 0010 AC-16: the hourly round hasn't run for this long.
+RUN_STALE = timedelta(hours=3)
 DROP_STUCK = timedelta(hours=2)
-# An alert about one silence or one stuck drop goes once; the key outlives any real episode.
+# An alert about one stuck drop goes once; the key outlives any real episode.
 ALERT_KEY_SECONDS = 14 * 24 * 60 * 60
 
 
@@ -86,6 +88,11 @@ def send_export(case, link: str) -> str | None:
 			"The site is removed 3 days after this email at the earliest. Subscribing before then keeps it: {0}",
 			lang=lang,
 		).format(case.site_url.rstrip("/") + SUBSCRIPTION_PATH),
+		# Spec 0010 AC-8: Frappe Cloud takes a backup when it archives a site and keeps it under its own policy.
+		_(
+			"After the site is removed, the hosting provider may keep backups of it for a limited time under its own policy.",
+			lang=lang,
+		),
 	]
 	subject = _("{0}: a copy of your records from {1}", lang=lang).format(BRAND_NAME, company)
 	return _send(case, subject, lines, redact=True)
@@ -137,11 +144,10 @@ def size_label(size) -> str:
 	return f"{max(size, 1) / 1024:.0f} KB"
 
 
-# Scheduled jobs (AC-21)
+# Scheduled jobs (spec 0007 AC-21, spec 0010 AC-14 and AC-16)
 
 
 def hourly():
-	alert_silent_benches()
 	alert_stuck_drops()
 
 
@@ -150,36 +156,56 @@ def daily():
 	send_digest()
 
 
-def alert_silent_benches():
-	"""A bench that hasn't reported for 3 hours: one email per silence."""
-	cutoff = utc_now() - BENCH_SILENT
-	for bench in frappe.get_all(
-		BENCH,
-		filters={"last_report_on": ("<", cutoff), "last_mode": ("in", ("dry_run", "live"))},
-		fields=["name", "last_report_on"],
-	):
-		if _first_alert(f"silent:{bench.name}:{bench.last_report_on}"):
-			ops_alert(
-				_("Hosting bench {0} has stopped reporting").format(bench.name),
-				[
-					_("Its last removal report was at {0} UTC.").format(bench.last_report_on),
-					_("Check the host cron line and the runner log in logs/books-removal.log."),
-				],
-			)
+def check_dormant_days():
+	"""Spec 0010 AC-14: Frappe Cloud stops the scheduler of a site nobody visits for `dormant_days`, and the
+	control site's scheduler is the only clock for removals. While it isn't 0, one email a day."""
+	days = frappe.db.get_single_value("System Settings", "dormant_days")
+	if not days:
+		return
+	if _first_alert(f"dormant:{utc_now().date()}"):
+		ops_alert(
+			_("The control site can go dormant"),
+			[
+				_(
+					"System Settings dormant_days is {0}, so the scheduler stops after that many quiet days."
+				).format(days),
+				_("Set it to 0 so the hourly removal round keeps running."),
+			],
+		)
+
+
+def alert_stale_run():
+	"""Spec 0010 AC-16: the hourly round's last run is more than 3 hours old, once a day while it holds."""
+	settings = frappe.db.get_singles_dict(SETTINGS)
+	last_run = settings.get("last_run_on")
+	if settings.get("mode") in (None, "off"):
+		return
+	last_run = frappe.utils.get_datetime(last_run) if last_run else None
+	if last_run and utc_now() - last_run <= RUN_STALE:
+		return
+	if _first_alert(f"stale-run:{utc_now().date()}"):
+		ops_alert(
+			_("The removal round has stopped running"),
+			[
+				_("Its last run was at {0} UTC.").format(last_run or "-"),
+				_("Check that the control site's scheduler is enabled and its workers are up."),
+			],
+		)
 
 
 def alert_stuck_drops():
-	"""A case `Dropping` for more than 2 hours: one email per case."""
+	"""A case `Dropping` for more than 2 hours after `drop_started_on`: one email per case."""
 	for case in frappe.get_all(
 		CASE,
 		filters={"status": "Dropping", "drop_started_on": ("<", utc_now() - DROP_STUCK)},
-		fields=["name", "site", "drop_started_on", "last_error"],
+		fields=["name", "site", "drop_started_on", "archive_requested_on", "last_error"],
 	):
 		if _first_alert(f"stuck:{case.name}"):
 			ops_alert(
 				_("The drop of {0} has not finished").format(case.site),
 				[
 					_("Case {0} has been Dropping since {1} UTC.").format(case.name, case.drop_started_on),
+					_("Archive requested on: {0}").format(case.archive_requested_on or "-"),
 					_("Last error: {0}").format(case.last_error or "-"),
 				],
 			)
@@ -187,7 +213,7 @@ def alert_stuck_drops():
 
 def send_approval_list():
 	"""One email a day listing the `Holding` cases that wait for a Removal Manager's approval (AC-20)."""
-	if not frappe.conf.get("books_removal_require_approval", True):
+	if not frappe.db.get_single_value(SETTINGS, "require_approval"):
 		return
 	cases = frappe.get_all(
 		CASE,
@@ -208,7 +234,9 @@ def send_approval_list():
 
 
 def send_digest():
-	"""The removals and cancellations of the last day."""
+	"""The removals and cancellations of the last day, the round's last run, the sites whose config isn't
+	Active (spec 0010 AC-16), and failed drops Frappe Cloud finished after all (spec 0011 AC-11)."""
+	late = reconcile_failed_drops()
 	since = utc_now() - timedelta(days=1)
 	removed = frappe.get_all(
 		CASE, filters={"status": "Removed", "removed_on": (">=", since)}, fields=["name", "site", "mode"]
@@ -218,13 +246,48 @@ def send_digest():
 		filters={"status": "Cancelled", "modified": (">=", frappe.utils.now_datetime() - timedelta(days=1))},
 		fields=["name", "site", "mode", "last_error"],
 	)
-	if not (removed or cancelled):
-		return
-	lines = [_("Removed: {0}").format(len(removed))]
-	lines += [f"{case.name}: {case.site}" for case in removed]
+	unconfigured = frappe.get_all(
+		SITE,
+		filters={"status": "Active", "config_status": ("!=", "Active")},
+		fields=["name", "config_status"],
+		order_by="name asc",
+	)
+	last_run = frappe.db.get_single_value(SETTINGS, "last_run_on")
+	lines = [_("Last removal run: {0} UTC").format(last_run or "-")]
+	lines += [_("Removed: {0}").format(len(removed))]
+	lines += [
+		f"{case.name}: {case.site}" + (f" ({_('archived after failing')})" if case.name in late else "")
+		for case in removed
+	]
 	lines += [_("Cancelled: {0}").format(len(cancelled))]
 	lines += [f"{case.name}: {case.site} ({case.mode}) {case.last_error or ''}".strip() for case in cancelled]
+	lines += [_("Sites whose config isn't Active: {0}").format(len(unconfigured))]
+	lines += [f"{row.name}: {_(row.config_status)}" for row in unconfigured]
 	send_ops(_("Removal digest"), lines, now=False)
+
+
+def reconcile_failed_drops() -> set[str]:
+	"""Spec 0011 AC-11: a `Failed` case whose drop started, and whose site Frappe Cloud now shows `Archived`,
+	becomes `Removed`. An API error leaves it for the next day. The names reconciled are returned."""
+	from rarebooks_control.providers import frappe_cloud
+	from rarebooks_control.removal import mark_removed
+
+	done = set()
+	for name in frappe.get_all(
+		CASE, filters={"status": "Failed", "drop_started_on": ("is", "set")}, pluck="name"
+	):
+		case = frappe.get_doc(CASE, name, for_update=True)
+		try:
+			cloud = frappe_cloud.get_site(case.site)
+		except frappe_cloud.FrappeCloudError:
+			frappe.db.commit()
+			continue
+		if cloud["status"] == frappe_cloud.ARCHIVED:
+			mark_removed(case)
+			done.add(name)
+		else:
+			frappe.db.commit()
+	return done
 
 
 def _first_alert(key: str) -> bool:

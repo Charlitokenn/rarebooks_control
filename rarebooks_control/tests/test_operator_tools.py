@@ -1,28 +1,22 @@
-"""Spec 0008 Milestone 4: the manual edit and Push now (AC-14), secret rotation (AC-15), roles on the server
-(AC-20), two factor sign in (AC-20), and the signature failure alert and runner rate limit (AC-22)."""
+"""Spec 0008 Milestone 4: the manual edit and Push now (AC-14), roles on the server (AC-20), two factor sign in
+(AC-20), and the signature failure alert (AC-22). Secret rotation is in `test_registry.py` (spec 0010 AC-12)."""
 
 from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
 
-from rarebooks_control import api, billing, push, removal
+from rarebooks_control import api, billing, registry
 from rarebooks_control.install import enable_two_factor_auth
 from rarebooks_control.tests.control import (
-	RUNNER_SECRET,
-	CustomerStub,
-	answer,
 	call,
 	issued,
 	reset_billing,
-	runner_config,
 )
 from rarebooks_control.tests.data_model import (
-	BENCH,
 	BILLING_MANAGER,
 	REMOVAL_MANAGER,
 	SYSTEM_MANAGER,
-	make_bench,
 	make_role_users,
 	make_site,
 )
@@ -33,10 +27,6 @@ OPS = "ops@example.com"
 
 def site_body(site: str) -> dict:
 	return {"site": site, "issued_at": issued()}
-
-
-def rotated_body(site: str, bench: str = BENCH) -> dict:
-	return {"bench": bench, "issued_at": issued(), "site": site}
 
 
 def ops_emails(sendmail) -> list[dict]:
@@ -51,7 +41,6 @@ class OperatorToolsTestCase(IntegrationTestCase):
 
 	def setUp(self):
 		reset_billing()
-		make_bench()
 		self.queue_push = self.start(patch("rarebooks_control.push.queue_push"))
 		self.sendmail = self.start(patch("frappe.sendmail"))
 		self.start(patch.dict(frappe.conf, {"books_ops_email": OPS}))
@@ -141,7 +130,7 @@ class IntegrationTestPushNow(OperatorToolsTestCase):
 				with self.assertRaises(frappe.PermissionError):
 					billing.push_now(row.name)
 				with self.assertRaises(frappe.PermissionError):
-					billing.rotate_secret(row.name)
+					registry.rotate_secret(row.name)
 
 	def test_a_removed_site_is_refused(self):
 		# covers: AC-13 (a Removed site is never pushed)
@@ -150,120 +139,7 @@ class IntegrationTestPushNow(OperatorToolsTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			billing.push_now(row.name)
 		with self.assertRaises(frappe.ValidationError):
-			billing.rotate_secret(row.name)
-
-
-class IntegrationTestRotation(OperatorToolsTestCase):
-	def rotate(self, site: str) -> tuple[str, str]:
-		"""Start a rotation as a Billing Manager; the old and the pending secret."""
-		old = frappe.get_doc(SITE, site).get_password("control_secret")
-		frappe.set_user(BILLING_MANAGER)
-		self.assertEqual(billing.rotate_secret(site), {"pending": True})
-		frappe.set_user("Administrator")
-		return old, frappe.get_doc(SITE, site).get_password("pending_secret")
-
-	def test_rotate_secret_stores_a_new_pending_secret_once(self):
-		# covers: AC-15
-		row = make_site("rotate.rarebooks.app")
-		old, pending = self.rotate(row.name)
-		self.assertEqual(len(pending), 64)
-		self.assertNotEqual(pending, old)
-		frappe.set_user(BILLING_MANAGER)
-		with self.assertRaises(frappe.ValidationError):
-			billing.rotate_secret(row.name)
-
-	def test_the_bench_gets_its_own_sites_rotations_only(self):
-		# covers: AC-15
-		row = make_site("mine.rarebooks.app")
-		other = make_site("theirs.rarebooks.app", hosting_bench=make_bench("bench-test-2"))
-		make_site("quiet.rarebooks.app")
-		_old, pending = self.rotate(row.name)
-		self.rotate(other.name)
-		self.assertEqual(
-			removal.rotation_instructions(BENCH),
-			[{"site": row.name, "action": "rotate_secret", "secret": pending}],
-		)
-
-	def test_while_pending_either_secret_works_and_is_answered_with_the_same(self):
-		# covers: AC-15
-		row = make_site("either.rarebooks.app")
-		old, pending = self.rotate(row.name)
-		for secret in (old, pending):
-			with self.subTest(secret=secret[:6]):
-				response = call(api.get_state, site_body(row.name), secret)
-				self.assertEqual(response.status_code, 200)
-				answer(response, secret)
-
-	def test_secret_rotated_swaps_pushes_and_the_old_secret_stops_working(self):
-		# covers: AC-15, AC-13
-		row = make_site("swap.rarebooks.app")
-		old, pending = self.rotate(row.name)
-		self.queue_push.reset_mock()
-		with runner_config(BENCH):
-			response = call(removal.secret_rotated, rotated_body(row.name), RUNNER_SECRET)
-		data = answer(response, RUNNER_SECRET)
-		self.assertEqual((response.status_code, data["status"]), (200, "rotated"))
-
-		doc = frappe.get_doc(SITE, row.name)
-		self.assertEqual(doc.get_password("control_secret"), pending)
-		self.assertFalse(doc.pending_secret)
-		self.assertEqual((doc.state_version, doc.push_status), (1, "Pending"))
-		self.queue_push.assert_called_once_with(row.name)
-
-		self.assertEqual(call(api.get_state, site_body(row.name), old).status_code, 401)
-		self.assertEqual(call(api.get_state, site_body(row.name), pending).status_code, 200)
-
-		stub = CustomerStub(pending)
-		with patch("rarebooks_control.push.post", stub):
-			push.push_site(row.name)
-		self.assertEqual(len(stub.pushes), 1, "the push is signed with the new secret")
-
-	def test_secret_rotated_with_no_rotation_or_for_another_bench_gets_409(self):
-		# covers: AC-15
-		row = make_site("none.rarebooks.app")
-		other = make_site("elsewhere.rarebooks.app", hosting_bench=make_bench("bench-test-2"))
-		self.rotate(other.name)
-		with runner_config(BENCH):
-			for site in (row.name, other.name, "unknown.rarebooks.app"):
-				with self.subTest(site=site):
-					response = call(removal.secret_rotated, rotated_body(site), RUNNER_SECRET)
-					self.assertEqual(response.status_code, 409)
-					self.assertEqual(answer(response, RUNNER_SECRET)["status"], "no_rotation")
-		self.assertTrue(frappe.get_doc(SITE, other.name).pending_secret, "the other bench's rotation waits")
-
-	def test_secret_rotated_with_a_bad_signature_gets_401(self):
-		# covers: AC-15
-		row = make_site("badsig.rarebooks.app")
-		self.rotate(row.name)
-		with runner_config(BENCH):
-			response = call(removal.secret_rotated, rotated_body(row.name), "not-the-runner-secret")
-		self.assertEqual(response.status_code, 401)
-		self.assertTrue(frappe.get_doc(SITE, row.name).pending_secret)
-
-	def test_no_secret_reaches_a_version_or_an_answer(self):
-		# covers: AC-15 (no secret shown in desk or written to any log), the security model
-		row = make_site("private.rarebooks.app")
-		old, pending = self.rotate(row.name)
-		frappe.set_user(BILLING_MANAGER)
-		doc = frappe.get_doc(SITE, row.name)
-		doc.owner_email = "new@example.com"
-		doc.save(ignore_version=False)
-		shown = frappe.as_json(frappe.get_doc(SITE, row.name).as_dict())
-		frappe.set_user("Administrator")
-		versions = frappe.get_all("Version", filters={"ref_doctype": SITE, "docname": row.name}, pluck="data")
-		for secret in (old, pending):
-			self.assertNotIn(secret, shown)
-			self.assertTrue(all(secret not in data for data in versions))
-
-	def test_the_31st_runner_call_in_a_minute_is_refused(self):
-		# covers: AC-22 (per bench limit, 120 a minute for runner calls)
-		row = make_site("limit.rarebooks.app")
-		with runner_config(BENCH), patch.object(removal, "RUNNER_LIMIT", 2):
-			codes = [
-				call(removal.secret_rotated, rotated_body(row.name), RUNNER_SECRET).status_code
-				for _ in range(3)
-			]
-		self.assertEqual(codes, [409, 409, 429])
+			registry.rotate_secret(row.name)
 
 
 class IntegrationTestSignatureFailureAlert(OperatorToolsTestCase):

@@ -1,7 +1,7 @@
-"""The signed contract with customer sites and hosting benches (specs 0005, 0007 and 0008).
+"""The signed contract with customer sites (specs 0005, 0008 and 0010).
 
 Every body is signed as `sha256=` + hex HMAC SHA256 of its exact bytes, sent in `X-Books-Signature` both
-ways. Site calls use that site's secret, runner calls use the bench's runner secret. A request's
+ways, with that site's secret. A request's
 `issued_at` must be within 5 minutes of now. Every signed answer, refusals and 401s included, goes through
 `signed_response`, so Frappe adds no `message` wrapper and the bytes signed are the bytes sent (AC-5).
 
@@ -50,7 +50,7 @@ def dumps(body: dict) -> bytes:
 def signed_response(body: dict, status: int, secret: str | bytes | None) -> Response:
 	"""Serialize `body` once, sign those exact bytes, and set the status.
 
-	With no secret (an unknown site or bench) the answer goes unsigned, and the caller treats it as a failure.
+	With no secret (an unknown site) the answer goes unsigned, and the caller treats it as a failure.
 	"""
 	data = dumps(body)
 	response = Response(data, status=status, content_type="application/json")
@@ -80,9 +80,7 @@ def note_signature_failure():
 				_(
 					"Calls to the control site failed their signature or checksum check more than 20 times since {0}:00 UTC."
 				).format(utc_now().strftime("%Y-%m-%d %H")),
-				_(
-					"Check the webhook settings at ClickPesa and PayPal, and the secrets of the hosting benches."
-				),
+				_("Check the webhook settings at ClickPesa and PayPal, and the config of the hosted sites."),
 			],
 		)
 
@@ -150,15 +148,6 @@ def verify_request(raw: bytes, body: dict | None, secrets: list[str]) -> SignedR
 	return None
 
 
-def runner_secret(bench) -> str | None:
-	"""The bench's runner secret from this site's config (spec 0007 AC-15)."""
-	secrets = frappe.conf.get("books_runner_secrets") or {}
-	if not isinstance(bench, str) or not isinstance(secrets, dict):
-		return None
-	secret = secrets.get(bench)
-	return secret if isinstance(secret, str) and secret else None
-
-
 def site_secrets(site_row) -> list[str]:
 	"""The site's current secret, then its pending one while a rotation is open (AC-15)."""
 	secrets = [site_row.get_password("control_secret", raise_exception=False)]
@@ -168,8 +157,8 @@ def site_secrets(site_row) -> list[str]:
 
 
 def over_limit(endpoint: str, key: str, limit: int) -> bool:
-	"""A per site or per bench counter for this minute. Frappe's `@rate_limit` keys on IP or user, and every
-	site and runner calls from the hosting server's one IP (spec 0008)."""
+	"""A per site counter for this minute. Frappe's `@rate_limit` keys on IP or user, and every site calls from
+	Frappe Cloud's shared IPs (spec 0008, spec 0010 AC-17)."""
 	minute = utc_now().strftime("%Y%m%d%H%M")
 	# make_key adds this site's prefix, as every frappe.cache key has, so sites sharing a Redis never mix.
 	cache_key = frappe.cache.make_key(f"rl:{endpoint}:{key}:{minute}")

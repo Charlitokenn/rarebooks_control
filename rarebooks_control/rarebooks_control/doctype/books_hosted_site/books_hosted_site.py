@@ -19,11 +19,12 @@ class BooksHostedSite(Document):
 		auto_renews: DF.Check
 		billing_period: DF.Literal["", "Monthly", "Yearly"]
 		company_name: DF.Data | None
+		config_sent_on: DF.Datetime | None
+		config_status: DF.Literal["Pending", "Active", "Failed"]
 		control_secret: DF.Password | None
 		exempt: DF.Check
 		failing_alerted: DF.Check
 		failing_since: DF.Datetime | None
-		hosting_bench: DF.Link
 		language: DF.Data | None
 		last_payment_on: DF.Datetime | None
 		last_push_error: DF.SmallText | None
@@ -38,6 +39,7 @@ class BooksHostedSite(Document):
 		push_status: DF.Literal["Synced", "Pending", "Failing"]
 		pushed_version: DF.Int
 		removed_on: DF.Datetime | None
+		rotation_started_on: DF.Datetime | None
 		site: DF.Data
 		site_url: DF.Data
 		state_version: DF.Int

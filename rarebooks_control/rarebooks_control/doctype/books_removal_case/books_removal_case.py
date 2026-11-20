@@ -24,8 +24,9 @@ class BooksRemovalCase(Document):
 
 		approved_by: DF.Link | None
 		approved_on: DF.Datetime | None
+		archive_requested_on: DF.Datetime | None
+		attempt_id: DF.Data | None
 		attempts: DF.Int
-		bench: DF.Link
 		company_name: DF.Data | None
 		delete_export_on: DF.Date | None
 		download_count: DF.Int

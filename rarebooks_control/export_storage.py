@@ -1,6 +1,7 @@
 """The private R2 bucket that holds removal exports, through its S3 API (spec 0007 AC-7, AC-9, AC-11, AC-16).
 
-The control site holds a read and delete token in `books_export_storage` of its `site_config.json`. Only this
+The control site holds a read and write token for the export bucket in `books_export_storage` of its
+`site_config.json` (spec 0010). Customer sites never get a token, only a presigned PUT URL for one key. Only this
 module talks to R2, so tests patch its functions. The keys are never logged.
 """
 
@@ -9,6 +10,8 @@ import frappe
 KEYS = ("endpoint_url", "bucket", "access_key_id", "secret_access_key")
 # A download link opens a presigned URL valid this long (AC-7).
 PRESIGNED_SECONDS = 60 * 60
+# A customer site's upload link works for one key this long (spec 0010 AC-3).
+UPLOAD_SECONDS = 6 * 60 * 60
 
 
 class StorageError(Exception):
@@ -51,6 +54,14 @@ def presigned_url(key: str, file_name: str) -> str:
 			"ResponseContentDisposition": f'attachment; filename="{file_name}"',
 		},
 		ExpiresIn=PRESIGNED_SECONDS,
+	)
+
+
+def presigned_put_url(key: str) -> str:
+	"""A PUT URL for exactly this key, valid 6 hours, handed to the customer site's export job (spec 0010 AC-3)."""
+	client, bucket = _client()
+	return client.generate_presigned_url(
+		"put_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=UPLOAD_SECONDS
 	)
 
 

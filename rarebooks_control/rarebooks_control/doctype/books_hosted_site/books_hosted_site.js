@@ -1,7 +1,8 @@
 // Copyright (c) 2026, RareBooks and contributors
 // For license information, please see license.txt
 
-// Spec 0008 AC-14, AC-15: the manual edit, Push now and Rotate secret. The server checks every rule again.
+// Spec 0008 AC-14, spec 0010 AC-11 and AC-12: the manual edit, Push now, Retry config and Rotate secret.
+// The server checks every rule again.
 frappe.ui.form.on("Books Hosted Site", {
 	refresh(frm) {
 		// Refresh runs after each load and save, so this is the saved provider.
@@ -11,11 +12,18 @@ frappe.ui.form.on("Books Hosted Site", {
 			return;
 		}
 		frm.add_custom_button(__("Push now"), () => push_now(frm));
-		if (!frm.doc.pending_secret) {
+		frm.add_custom_button(__("Retry config"), () => retry_config(frm));
+		if (frm.doc.pending_secret) {
+			frm.dashboard.set_headline(
+				__("A secret rotation waits for the site to answer a ping with its new secret.")
+			);
+		} else if (frm.doc.config_status === "Active") {
 			frm.add_custom_button(__("Rotate secret"), () => rotate_secret(frm));
 		} else {
 			frm.dashboard.set_headline(
-				__("A secret rotation is waiting for the hosting bench's next run.")
+				__("The site's config is {0}. It gets no push or removal round until it is Active.", [
+					__(frm.doc.config_status),
+				])
 			);
 		}
 	},
@@ -42,11 +50,11 @@ function push_now(frm) {
 function rotate_secret(frm) {
 	frappe.confirm(
 		__(
-			"Make a new secret for this site? The hosting bench writes it into the site on its next run, and the old secret stops working after that."
+			"Make a new secret for this site? It is written into the site's config through Frappe Cloud, and the old secret stops working once the site answers with the new one."
 		),
 		() =>
 			frappe.call({
-				method: "rarebooks_control.billing.rotate_secret",
+				method: "rarebooks_control.registry.rotate_secret",
 				args: { site: frm.doc.name },
 				freeze: true,
 				callback() {
@@ -55,4 +63,19 @@ function rotate_secret(frm) {
 				},
 			})
 	);
+}
+
+function retry_config(frm) {
+	frappe.call({
+		method: "rarebooks_control.registry.retry_config",
+		args: { site: frm.doc.name },
+		freeze: true,
+		callback() {
+			frappe.show_alert({ message: __("Config sent"), indicator: "green" });
+			frm.reload_doc();
+		},
+		error() {
+			frm.reload_doc();
+		},
+	});
 }
