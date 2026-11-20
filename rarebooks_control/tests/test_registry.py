@@ -369,9 +369,9 @@ class UnitTestFrappeCloudClient(UnitTestCase):
 		self.assertEqual(
 			urls,
 			[
-				"https://frappecloud.com/api/method/press.api.site.get",
-				"https://frappecloud.com/api/method/press.api.site.update_config",
-				"https://frappecloud.com/api/method/press.api.site.archive",
+				"https://cloud.frappe.io/api/method/press.api.site.get",
+				"https://cloud.frappe.io/api/method/press.api.site.update_config",
+				"https://cloud.frappe.io/api/method/press.api.site.archive",
 			],
 		)
 		for c in post.call_args_list:

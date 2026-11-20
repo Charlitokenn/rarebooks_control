@@ -13,7 +13,9 @@ import frappe
 import requests
 from urllib3.exceptions import NameResolutionError, NewConnectionError
 
-BASE_URL = "https://frappecloud.com"
+# frappecloud.com now answers every API call with a 308 to cloud.frappe.io. The client never follows redirects
+# (an archive must not be sent twice, spec 0011 AC-1), so it calls the new host directly (spec 0010 AC-13).
+BASE_URL = "https://cloud.frappe.io"
 TIMEOUT_SECONDS = 30
 CONF_KEYS = ("frappe_cloud_api_key", "frappe_cloud_api_secret", "frappe_cloud_team")
 # Frappe Cloud's site status once an archive has finished.
