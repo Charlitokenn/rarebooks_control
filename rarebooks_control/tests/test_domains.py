@@ -527,6 +527,26 @@ class TestVisibility(DomainTestCase):
 			self.assertNotIn(FakeCloudflare.CONF["cloudflare_api_token"], log.error or "")
 
 
+class UnitTestFrappeCloudDomains(UnitTestCase):
+	# covers: AC-7, AC-13
+	def test_check_dns_reads_a_417_as_not_matched_and_raises_other_errors(self):
+		from rarebooks_control.providers import frappe_cloud
+
+		creds = {"frappe_cloud_api_key": "k", "frappe_cloud_api_secret": "s", "frappe_cloud_team": "t"}
+		with (
+			patch.dict(frappe.conf, creds),
+			patch("rarebooks_control.providers.frappe_cloud.requests.post") as post,
+		):
+			post.return_value = Mock(status_code=417)
+			self.assertFalse(frappe_cloud.check_dns(OLD, DOMAIN))
+			post.return_value = Mock(status_code=200)
+			post.return_value.json.return_value = {"message": {"matched": True}}
+			self.assertTrue(frappe_cloud.check_dns(OLD, DOMAIN))
+			post.return_value = Mock(status_code=403)
+			with self.assertRaises(FrappeCloudError):
+				frappe_cloud.check_dns(OLD, DOMAIN)
+
+
 class UnitTestCloudflareClient(UnitTestCase):
 	def response(self, status=200, body=None):
 		response = Mock(status_code=status)

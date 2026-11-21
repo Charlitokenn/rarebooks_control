@@ -24,6 +24,8 @@ CONF_KEYS = ("frappe_cloud_api_key", "frappe_cloud_api_secret", "frappe_cloud_te
 ARCHIVED = "Archived"
 ACTIVE = "Active"
 NOT_FOUND = 404
+# Frappe Cloud's answer to `check_dns` while the domain doesn't point at the site yet.
+DNS_NOT_MATCHED = 417
 
 
 class FrappeCloudError(Exception):
@@ -95,8 +97,16 @@ def domain_exists(domain: str) -> str | None:
 
 
 def check_dns(name: str, domain: str) -> bool:
-	"""True when Frappe Cloud sees `domain` pointing at the site."""
-	answer = _call("check_dns", {"name": name, "domain": domain})
+	"""True when Frappe Cloud sees `domain` pointing at the site. Checked live on 2026-11-21: with no record
+	pointing there, Frappe Cloud answers HTTP 417 (`DNSValidationError`), not `matched` false."""
+	try:
+		answer = _call("check_dns", {"name": name, "domain": domain})
+	except OutcomeUnknown:
+		raise
+	except FrappeCloudError as error:
+		if error.status == DNS_NOT_MATCHED:
+			return False
+		raise
 	return isinstance(answer, dict) and answer.get("matched") is True
 
 
