@@ -710,6 +710,7 @@ class TestDrop(RemovalTestCase):
 		self.assertEqual(row.status, "Removed")
 		self.assertTrue(row.removed_on and case.removed_on)
 		self.assertEqual(self.cloud.archives(), 1)
+		self.assertEqual(self.cloud.count("domain_exists"), 0, "Archived needs no second fact (0013 AC-1)")
 
 	def test_dropping_is_committed_before_the_archive_call(self):
 		# covers: 0010 AC-6
@@ -955,6 +956,157 @@ class TestDrop(RemovalTestCase):
 		self.assertIn("archived after failing", lines)
 		self.assertIn("Last removal run:", lines)
 		self.assertIn("waiting.rarebooks.app: Pending", lines)
+
+
+class TestArchiveProof(RemovalTestCase):
+	"""Spec 0013: Frappe Cloud hides an archived site from the team (HTTP 403) and releases its own name."""
+
+	def dropping(self, site: str):
+		"""A registered site whose drop started and whose archive was called and marked."""
+		self.site(site)
+		self.to_drop_due(site)
+		case = self.drop(site)
+		self.assertEqual((case.status, bool(case.archive_requested_on)), ("Dropping", True))
+		return case
+
+	def removal_logs(self):
+		# Frappe sets up a logger's handlers on its first use, which would drop the one `assertLogs` adds.
+		frappe.logger("rarebooks_control.removal")
+		return self.assertLogs(f"rarebooks_control.removal-{frappe.local.site}", "INFO")
+
+	def forbidden(self) -> FrappeCloudError:
+		return FrappeCloudError("press.api.site.get answered HTTP 403", 403)
+
+	def not_proven(self, site: str, drop_started: bool = True) -> str:
+		with self.assertRaises(FrappeCloudError) as caught:
+			removal.site_archived(site, drop_started)
+		return str(caught.exception)
+
+	def test_only_archived_or_a_403_with_the_name_released_for_a_started_drop_is_proof(self):
+		# covers: 0013 AC-1, AC-8
+		site = "table.rarebooks.app"
+		self.site(site)
+		self.assertEqual(removal.site_archived(site, drop_started=True)[0], None, "Active is no proof")
+		self.cloud.sites[site]["status"] = "Archived"
+		self.assertEqual(removal.site_archived(site, drop_started=False)[0], "status")
+		self.cloud.sites[site]["status"] = "Active"
+
+		self.cloud.errors["get"] = self.forbidden()
+		self.assertIn("the site's name is still held", self.not_proven(site))
+		self.cloud.calls.clear()
+		self.assertEqual(self.not_proven(site, drop_started=False), "press.api.site.get answered HTTP 403")
+		self.assertEqual(self.cloud.count("domain_exists"), 0, "asked only for a drop we started")
+
+		self.cloud.own_names.discard(site)
+		self.assertEqual(removal.site_archived(site, drop_started=True), ("released", None))
+		# A renamed site or a name taken by another team: held, and the holder is never named.
+		self.cloud.elsewhere[site] = "theirs.frappe.cloud"
+		text = self.not_proven(site)
+		self.assertIn("still held", text)
+		self.assertNotIn("theirs", text)
+		del self.cloud.elsewhere[site]
+
+		self.cloud.errors["domain_exists"] = OutcomeUnknown("press.api.site.domain_exists sent, no answer")
+		self.assertIn("domain_exists failed (no answer)", self.not_proven(site))
+		self.cloud.errors["domain_exists"] = FrappeCloudError(
+			"press.api.site.domain_exists answered HTTP 500", 500
+		)
+		self.assertIn("domain_exists failed (HTTP 500)", self.not_proven(site))
+		del self.cloud.errors["domain_exists"]
+
+		for error in (
+			FrappeCloudError("press.api.site.get answered HTTP 500", 500),
+			OutcomeUnknown("press.api.site.get sent, no answer (ReadTimeout)"),
+			FrappeCloudError("press.api.site.get answered HTTP 404", 404),
+		):
+			with self.subTest(str(error)):
+				self.cloud.errors["get"] = error
+				self.cloud.calls.clear()
+				self.assertEqual(self.not_proven(site), str(error))
+				self.assertEqual(self.cloud.count("domain_exists"), 0)
+
+	def test_a_finished_archive_is_removed_by_the_released_name_and_logged(self):
+		# covers: 0013 AC-1, AC-2, AC-7
+		case = self.dropping("released.rarebooks.app")
+		self.cloud.finish_archive(case.site)
+		with self.removal_logs() as logs:
+			case = self.drop(case.site)
+		self.assertEqual(case.status, "Removed")
+		row = frappe.get_doc(SITE, case.site)
+		self.assertEqual(row.status, "Removed")
+		self.assertTrue(row.removed_on and case.removed_on)
+		self.assertTrue(
+			any(
+				f"{case.name} of {case.site} is removed: 403 and name released" in line
+				for line in logs.output
+			)
+		)
+		self.assertEqual(self.cloud.archives(), 1)
+
+	def test_a_403_with_the_name_still_held_fails_on_the_third_poll_and_never_removes(self):
+		# covers: 0013 AC-1, AC-2, AC-8
+		case = self.dropping("held.rarebooks.app")
+		self.cloud.errors["get"] = self.forbidden()
+		with patch("rarebooks_control.removal_mail.send_ops") as send_ops:
+			statuses = [self.drop(case.site).status for _run in range(3)]
+		self.assertEqual(statuses, ["Dropping", "Dropping", "Failed"])
+		send_ops.assert_called_once()
+		case = self.case(case.site)
+		self.assertIn("the site's name is still held", case.last_error)
+		self.assertEqual(frappe.db.get_value(SITE, case.site, "status"), "Active")
+		self.assertEqual(self.cloud.archives(), 1)
+
+	def test_an_unmarked_dropping_case_is_removed_by_proof_with_no_second_archive(self):
+		# covers: 0013 AC-2
+		site = "unmarked.rarebooks.app"
+		self.site(site)
+		self.to_drop_due(site)
+		with patch.object(removal, "_write_archive_mark", side_effect=RuntimeError("lost")):
+			case = self.drop(site)
+		self.assertEqual((case.status, case.archive_requested_on), ("Dropping", None))
+		self.cloud.finish_archive(site)
+		self.assertEqual(self.drop(site).status, "Removed")
+		self.assertEqual(self.cloud.archives(), 1)
+
+	def test_at_drop_start_a_403_is_a_failed_step_even_with_the_name_released(self):
+		# covers: 0013 AC-3
+		site = "start.rarebooks.app"
+		self.site(site)
+		self.to_drop_due(site)
+		self.cloud.finish_archive(site)
+		case = self.drop(site)
+		self.assertEqual((case.status, case.attempts, case.drop_started_on), ("Holding", 1, None))
+		self.assertIn("HTTP 403", case.last_error)
+		self.assertEqual((self.cloud.archives(), self.cloud.count("domain_exists")), (0, 0))
+
+	def test_the_digest_removes_a_failed_drop_only_once_its_name_is_released(self):
+		# covers: 0013 AC-4, AC-7
+		late, held = "late403.rarebooks.app", "stillheld.rarebooks.app"
+		for site in (late, held):
+			self.site(site)
+			self.to_drop_due(site)
+			frappe.cache.delete_keys("removal:exports:")
+		self.cloud.errors["archive"] = FrappeCloudError("press.api.site.archive answered HTTP 500", 500)
+		with patch("rarebooks_control.removal_mail.send_ops"):
+			for site in (late, held):
+				for _run in range(3):
+					self.drop(site)
+		self.assertEqual([self.case(site).status for site in (late, held)], ["Failed", "Failed"])
+		self.cloud.finish_archive(late)
+		# Hidden from the team, but its name is still held: no proof.
+		self.cloud.archived.add(held)
+		frappe.db.set_single_value(SETTINGS, "last_run_on", utc_now())
+		with (
+			patch("rarebooks_control.removal_mail.send_ops") as send_ops,
+			self.removal_logs() as logs,
+		):
+			removal_mail.send_digest()
+		self.assertEqual(self.case(late).status, "Removed")
+		self.assertEqual(self.case(held).status, "Failed")
+		self.assertEqual(frappe.db.get_value(SITE, held, "status"), "Active")
+		send_ops.assert_called_once()
+		self.assertIn(f"{late} (archived after failing)", "\n".join(send_ops.call_args.args[1]))
+		self.assertTrue(any("403 and name released" in line and late in line for line in logs.output))
 
 
 class TestCancel(RemovalTestCase):

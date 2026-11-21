@@ -227,9 +227,21 @@ class FakeFrappeCloud:
 		self.dns_seen: set[str] = set()
 		self.elsewhere: dict[str, str] = {}
 		self.new_domain_status = "Active"
+		# Spec 0013: Frappe Cloud stores each site's own name as a domain, so `domain_exists` answers it for a live
+		# site; an archived site answers 403 to the team and its own name is released.
+		self.own_names: set[str] = set()
+		self.archived: set[str] = set()
 
 	def add(self, name: str, status: str = "Active", group: str | None = GROUP):
 		self.sites[name] = {"name": name, "status": status, "group": group}
+		self.own_names.add(name)
+
+	def finish_archive(self, name: str):
+		"""What a real archive looks like to the team about 30 seconds later (spec 0013 Context): every site call
+		answers 403, and the site's own name and its domains are released. An `errors` override still wins."""
+		self.archived.add(name)
+		self.own_names.discard(name)
+		self.domain_rows.pop(name, None)
 
 	def patch(self):
 		from rarebooks_control.providers import frappe_cloud
@@ -256,6 +268,8 @@ class FakeFrappeCloud:
 	def get_site(self, name):
 		self.calls.append(("get", name))
 		self._maybe_raise("get")
+		if name in self.archived:
+			self._refuse("get", 403)
 		if name not in self.sites:
 			from rarebooks_control.providers.frappe_cloud import FrappeCloudError
 
@@ -286,6 +300,8 @@ class FakeFrappeCloud:
 	def _site(self, method: str, name: str):
 		self.calls.append((method, name))
 		self._maybe_raise(method)
+		if name in self.archived:
+			self._refuse(method, 403)
 		if name not in self.sites:
 			self._refuse(method, 404)
 
@@ -299,6 +315,8 @@ class FakeFrappeCloud:
 		for site, rows in self.domain_rows.items():
 			if any(row["domain"] == domain for row in rows):
 				return site
+		if domain in self.own_names:
+			return domain
 		return self.elsewhere.get(domain)
 
 	def check_dns(self, name, domain):

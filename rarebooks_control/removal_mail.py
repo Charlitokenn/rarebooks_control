@@ -271,10 +271,11 @@ def send_digest():
 
 
 def reconcile_failed_drops() -> set[str]:
-	"""Spec 0011 AC-11: a `Failed` case whose drop started, and whose site Frappe Cloud now shows `Archived`,
-	becomes `Removed`. An API error leaves it for the next day. The names reconciled are returned."""
-	from rarebooks_control.providers import frappe_cloud
-	from rarebooks_control.removal import mark_removed
+	"""Spec 0011 AC-11 and spec 0013 AC-4: a `Failed` case whose drop started, and whose site is now proven
+	archived, becomes `Removed`. Anything else, error or not, leaves it for the next day with no alert. The names
+	reconciled are returned."""
+	from rarebooks_control.providers.frappe_cloud import FrappeCloudError
+	from rarebooks_control.removal import log_proof, mark_removed, site_archived
 
 	done = set()
 	for name in frappe.get_all(
@@ -282,12 +283,12 @@ def reconcile_failed_drops() -> set[str]:
 	):
 		case = frappe.get_doc(CASE, name, for_update=True)
 		try:
-			cloud = frappe_cloud.get_site(case.site)
-		except frappe_cloud.FrappeCloudError:
-			frappe.db.commit()
-			continue
-		if cloud["status"] == frappe_cloud.ARCHIVED:
+			proof, _cloud = site_archived(case.site, drop_started=bool(case.drop_started_on))
+		except FrappeCloudError:
+			proof = None
+		if proof:
 			mark_removed(case)
+			log_proof(case, proof)
 			done.add(name)
 		else:
 			frappe.db.commit()

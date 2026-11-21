@@ -632,8 +632,8 @@ STEP_FUNCTIONS = {
 
 
 def start_domain_cleanup(site: str):
-	"""Called where `archive_requested_on` is set and in `mark_removed`, in their transaction. No outside call;
-	a repeat changes nothing."""
+	"""Called only in `mark_removed`, in its transaction, once the site is proven archived (spec 0013 AC-5). No
+	outside call; a repeat changes nothing."""
 	row = frappe.db.get_value(
 		SITE, site, ["subdomain", "domain_cleaned_on", "domain_step"], as_dict=True, for_update=True
 	)
@@ -690,7 +690,7 @@ def clean_domain(site: str):
 			_("The domain of {0} isn't cleaned up").format(site),
 			[
 				_(
-					"The DNS record or the Frappe Cloud domain of {0} is still there 24 hours after its archive was requested."
+					"The DNS record or the Frappe Cloud domain of {0} is still there 24 hours after its site was archived."
 				).format(_domain(row)),
 				_("The cleanup keeps trying every hour. Check the Error Log and Cloudflare."),
 			],
@@ -708,20 +708,17 @@ def _remove_record(row) -> bool:
 
 
 def _remove_cloud_domain(row) -> bool:
-	"""Done when Frappe Cloud no longer lists the domain, or shows the site archived or not found. Frappe
-	Cloud's own archive deletes a site's domains, so no bench group check here."""
-	try:
-		cloud = frappe_cloud.get_site(row.site)
-	except FrappeCloudError as error:
-		if error.status == frappe_cloud.NOT_FOUND:
-			return True
-		raise
-	if cloud["status"] == frappe_cloud.ARCHIVED:
+	"""Spec 0013 AC-6: done once no Frappe Cloud site holds the domain, or another site does. While our site
+	holds it, it is removed if listed and not primary, and counts as done at a later sweep. Every error raises,
+	so the sweep waits. Frappe Cloud's own archive releases a site's domains, so no bench group check here."""
+	domain = _domain(row)
+	holder = frappe_cloud.domain_exists(domain)
+	if not holder or not _same_name(holder, row.site):
 		return True
-	if not _cloud_domain(row):
-		return True
-	frappe_cloud.remove_domain(row.site, _domain(row))
-	return not _cloud_domain(row)
+	listed = _cloud_domain(row)
+	if listed and not listed["primary"]:
+		frappe_cloud.remove_domain(row.site, domain)
+	return False
 
 
 # Shared by the steps and cleanup
@@ -737,8 +734,12 @@ def _cloud_domain(row) -> dict | None:
 
 
 def _is_our_cname(record: dict, site: str) -> bool:
-	content = (record.get("content") or "").lower().rstrip(".")
-	return record.get("type") == "CNAME" and content == site.lower().rstrip(".")
+	return record.get("type") == "CNAME" and _same_name(record.get("content") or "", site)
+
+
+def _same_name(one: str, other: str) -> bool:
+	"""Host names compared ignoring letter case and a trailing dot."""
+	return one.lower().rstrip(".") == other.lower().rstrip(".")
 
 
 def _check_bench_group(site: str):

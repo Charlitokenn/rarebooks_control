@@ -108,6 +108,9 @@ class TestLabel(DomainTestCase):
 			with self.assertRaises(frappe.ValidationError) as caught:
 				registry.check_subdomain(label)
 			self.assertIn("taken", str(caught.exception))
+		# A site's own `.frappe.cloud` name never makes the same label under our zone look taken (spec 0013).
+		self.existing_site()
+		self.assertEqual(registry.check_subdomain(LABEL), LABEL)
 
 	# covers: AC-2
 	def test_cloudflare_or_frappe_cloud_unreachable_refuses_with_try_again(self):
@@ -426,22 +429,22 @@ class TestCleanup(DomainTestCase):
 		self.runs(5)
 		self.assertEqual(self.step(site), ("Active", None))
 
-	def archived(self, site: str = OLD):
-		"""Frappe Cloud's own archive drops the host name and deletes the site's domains."""
-		self.cloud.sites[site]["status"] = "Archived"
-		self.cloud.domain_rows.pop(site, None)
-
-	# covers: AC-11
-	def test_the_archive_mark_starts_cleanup_and_the_sweep_runs_with_mode_off(self):
+	# covers: AC-11, 0013 AC-5
+	def test_mark_removed_not_the_archive_mark_starts_cleanup_and_the_sweep_runs_with_mode_off(self):
 		self.active_domain()
 		case = self.dropping_case()
+		before = self.row().as_dict()
 		removal._write_archive_mark(case.name, utc_now())
 		frappe.db.commit()
+		row = self.row()
+		for field in ("domain_status", "domain_step", "domain_step_started_on", "domain_cleaned_on"):
+			self.assertEqual(row.get(field), before.get(field), field)
+		removal.mark_removed(frappe.get_doc(CASE, case.name))
 		self.assertEqual(self.step(), ("Working", "Cleanup"))
 		started = self.row().domain_step_started_on
 		removal.mark_removed(frappe.get_doc(CASE, case.name))
-		self.assertEqual(self.row().domain_step_started_on, started)
-		self.archived()
+		self.assertEqual(self.row().domain_step_started_on, started, "a repeat keeps the clock")
+		self.cloud.finish_archive(OLD)
 		removal.run_round()
 		row = self.row()
 		self.assertEqual(
@@ -467,24 +470,24 @@ class TestCleanup(DomainTestCase):
 		registry.sweep_domain_cleanup()
 		self.assertEqual(self.send_ops.call_count, 1)
 		del self.dns.errors["delete"]
-		self.archived()
+		self.cloud.finish_archive(OLD)
 		registry.sweep_domain_cleanup()
 		self.assertEqual(self.step(), (None, "Cleanup"))
 
-	# covers: AC-11
-	def test_a_foreign_record_is_left_alone_and_a_site_frappe_cloud_cant_find_counts_as_gone(self):
+	# covers: AC-11, 0013 AC-6
+	def test_a_foreign_record_is_left_alone_and_a_domain_no_site_holds_counts_as_gone(self):
 		self.with_domain()
 		foreign = self.dns.add(DOMAIN, "A", "203.0.113.9")
 		self.runs()
 		self.assertEqual(self.step(), ("Failed", "DNS"))
 		removal.mark_removed(self.dropping_case())
-		del self.cloud.sites[OLD]
 		registry.sweep_domain_cleanup()
 		self.assertEqual(self.step(), (None, "Cleanup"))
 		self.assertIn(foreign, self.dns.records)
+		self.assertEqual(self.cloud.count("remove_domain"), 0)
 
-	# covers: AC-11
-	def test_a_listed_domain_is_removed_on_frappe_cloud_and_retry_isnt_offered_in_cleanup(self):
+	# covers: AC-11, 0013 AC-6
+	def test_a_listed_domain_is_removed_then_done_once_released_and_retry_isnt_offered(self):
 		self.with_domain()
 		self.runs(2)
 		removal.mark_removed(self.dropping_case())
@@ -492,9 +495,40 @@ class TestCleanup(DomainTestCase):
 		registry.sweep_domain_cleanup()
 		self.assertEqual(self.cloud.count("remove_domain"), 1)
 		self.assertEqual(self.cloud.domain_rows[OLD], [])
-		self.assertEqual(self.step(), (None, "Cleanup"))
+		self.assertEqual(self.step(), ("Working", "Cleanup"), "done only once domain_exists is asked again")
 		registry.sweep_domain_cleanup()
+		self.assertEqual(self.step(), (None, "Cleanup"))
 		self.assertEqual(self.cloud.count("remove_domain"), 1)
+
+	# covers: 0013 AC-6
+	def test_the_frappe_cloud_part_waits_while_our_site_holds_the_domain(self):
+		self.active_domain()
+		removal.mark_removed(self.dropping_case())
+		# Primary on our site: wait, and never remove it.
+		registry.sweep_domain_cleanup()
+		self.assertEqual((self.step(), self.cloud.count("remove_domain")), (("Working", "Cleanup"), 0))
+		# A 404 or 403 from the site's domains, or any domain_exists error, waits too.
+		for method, error in (
+			("domains", FrappeCloudError("press.api.site.domains answered HTTP 404", 404)),
+			("domains", FrappeCloudError("press.api.site.domains answered HTTP 403", 403)),
+			("domain_exists", OutcomeUnknown("press.api.site.domain_exists sent, no answer")),
+		):
+			with self.subTest(f"{method} {error}"):
+				self.cloud.errors[method] = error
+				registry.sweep_domain_cleanup()
+				self.assertEqual(self.step(), ("Working", "Cleanup"))
+				del self.cloud.errors[method]
+		# Held by our site under another letter case and a trailing dot: still ours.
+		self.cloud.domain_rows.pop(OLD)
+		self.cloud.elsewhere[DOMAIN] = OLD.upper() + "."
+		registry.sweep_domain_cleanup()
+		self.assertEqual(self.step(), ("Working", "Cleanup"))
+		# Held by another site: our part is done.
+		self.cloud.elsewhere[DOMAIN] = "theirs.frappe.cloud"
+		registry.sweep_domain_cleanup()
+		self.assertEqual(self.step(), (None, "Cleanup"))
+		self.assertEqual(self.cloud.count("remove_domain"), 0)
+		self.send_ops.assert_not_called()
 
 
 class TestVisibility(DomainTestCase):

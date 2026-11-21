@@ -728,12 +728,13 @@ def start_drop(name: str):
 	if reason:
 		_wait(case, reason)
 		return
+	# Spec 0013 AC-3: before `Dropping` is saved only `Archived` proves an archive; a 403 is a failed step.
 	try:
-		cloud = frappe_cloud.get_site(case.site)
+		proof, cloud = site_archived(case.site, drop_started=False)
 	except FrappeCloudError as error:
 		drop_failed(case, str(error))
 		return
-	if cloud["status"] == frappe_cloud.ARCHIVED:
+	if proof:
 		mark_removed(case)
 		return
 	reason = cloud_refusal(case.site, cloud, settings)
@@ -763,19 +764,21 @@ def start_drop(name: str):
 
 
 def poll_drop(name: str):
-	"""Spec 0011 AC-2: one hourly job for a `Dropping` case, under the case row lock. Frappe Cloud is read; an
-	`Archived` site is `Removed`; a marked case only waits; an unmarked one with the site still Active runs every
-	guard again and calls the archive once more."""
+	"""Spec 0011 AC-2 and spec 0013 AC-2: one hourly job for a `Dropping` case, under the case row lock. A site
+	proven archived is `Removed`, marked or not; a read that proves nothing and errors counts a failed step; a
+	marked case only waits; an unmarked one with the site still Active runs every guard again and calls the
+	archive once more."""
 	case = frappe.get_doc(CASE, name, for_update=True)
 	if case.status != "Dropping":
 		return
 	try:
-		cloud = frappe_cloud.get_site(case.site)
+		proof, cloud = site_archived(case.site, drop_started=bool(case.drop_started_on))
 	except FrappeCloudError as error:
 		drop_failed(case, str(error))
 		return
-	if cloud["status"] == frappe_cloud.ARCHIVED:
+	if proof:
 		mark_removed(case)
+		log_proof(case, proof)
 		return
 	if case.archive_requested_on or cloud["status"] != frappe_cloud.ACTIVE:
 		frappe.db.commit()
@@ -820,11 +823,57 @@ def save_archive_mark(name: str):
 
 
 def _write_archive_mark(name: str, when: datetime):
-	from rarebooks_control.registry import start_domain_cleanup
-
+	# Spec 0013 AC-5: the mark doesn't start the domain cleanup. An unknown outcome counts as requested, and the
+	# site behind the domain may still be running; only `mark_removed` starts it.
 	frappe.db.set_value(CASE, name, "archive_requested_on", when)
-	# Spec 0012 AC-11: the domain cleanup starts in the same transaction as the archive mark.
-	start_domain_cleanup(frappe.db.get_value(CASE, name, "site"))
+
+
+# Proving an archive (spec 0013 AC-1, AC-7, AC-8)
+
+PROOF_STATUS = "status"
+PROOF_RELEASED = "released"
+
+
+def site_archived(site: str, drop_started: bool) -> tuple[str | None, dict | None]:
+	"""Whether Frappe Cloud shows the site archived, from reads in this job. `("status", cloud)` when `get` shows
+	`Archived`; `("released", None)` when `get` answers 403 for a drop we started and the site's own name is
+	released; `(None, cloud)` for any other site `get` answers. Anything that proves nothing and isn't an answer
+	raises `FrappeCloudError`, with a text that names no other site and no secret (AC-8)."""
+	try:
+		cloud = frappe_cloud.get_site(site)
+	except FrappeCloudError as error:
+		# A 403 also means a wrong or revoked key, so it is only worth a second fact for a drop we started.
+		if error.status != frappe_cloud.FORBIDDEN or not drop_started:
+			raise
+		_check_name_released(site)
+		return PROOF_RELEASED, None
+	if cloud["status"] == frappe_cloud.ARCHIVED:
+		return PROOF_STATUS, cloud
+	return None, cloud
+
+
+def _check_name_released(site: str):
+	"""Raise unless `domain_exists` answers that no Frappe Cloud site holds the site's own name. An unauthorized
+	call fails rather than answering None, so a broken key can't pass here (AC-9 checks that live)."""
+	try:
+		holder = frappe_cloud.domain_exists(site)
+	except FrappeCloudError as error:
+		answer = f"HTTP {error.status}" if error.status else "no answer"
+		raise FrappeCloudError(
+			f"press.api.site.get answered HTTP 403 and domain_exists failed ({answer})", error.status
+		) from None
+	if holder:
+		raise FrappeCloudError(
+			"press.api.site.get answered HTTP 403 and the site's name is still held", frappe_cloud.FORBIDDEN
+		)
+
+
+def log_proof(case, proof: str):
+	"""AC-7: a removal proven by the released name gets its own log line, so it stands apart from `Archived`."""
+	if proof == PROOF_RELEASED:
+		frappe.logger("rarebooks_control.removal").info(
+			f"Removal: {case.name} of {case.site} is removed: 403 and name released"
+		)
 
 
 def drop_failed(case, error: str):
@@ -839,8 +888,8 @@ def drop_failed(case, error: str):
 
 
 def mark_removed(case):
-	"""Frappe Cloud shows the site `Archived`: the case is `Removed` and the registry row too, whatever its
-	config status. Safe to repeat. Saves and commits."""
+	"""The site is proven archived (spec 0013 AC-1): the case is `Removed` and the registry row too, whatever its
+	config status, and the domain cleanup starts. Safe to repeat. Saves and commits."""
 	now = signing.utc_now()
 	case.status = "Removed"
 	case.removed_on = now
@@ -850,7 +899,8 @@ def mark_removed(case):
 		row.status = "Removed"
 		row.removed_on = now
 		row.save(ignore_permissions=True)
-	# Spec 0012 AC-11: a cleanup the archive mark didn't start starts here; a repeat changes nothing.
+	# Spec 0013 AC-5: the only place the domain cleanup starts, in the transaction that removes the row; a
+	# repeat changes nothing.
 	from rarebooks_control.registry import start_domain_cleanup
 
 	start_domain_cleanup(row.name)

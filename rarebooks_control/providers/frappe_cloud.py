@@ -23,7 +23,9 @@ CONF_KEYS = ("frappe_cloud_api_key", "frappe_cloud_api_secret", "frappe_cloud_te
 # Frappe Cloud's site status once an archive has finished.
 ARCHIVED = "Archived"
 ACTIVE = "Active"
-NOT_FOUND = 404
+# What `get` answers for an archived site: it is no longer visible to the team (checked live on 2026-11-21). A
+# wrong or revoked key answers the same, so a 403 alone never proves an archive (spec 0013 AC-1).
+FORBIDDEN = 403
 # Frappe Cloud's answer to `check_dns` while the domain doesn't point at the site yet.
 DNS_NOT_MATCHED = 417
 
