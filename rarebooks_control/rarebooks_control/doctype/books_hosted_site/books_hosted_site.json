@@ -19,6 +19,14 @@
   "config_sent_on",
   "column_break_config",
   "rotation_started_on",
+  "section_break_domain",
+  "subdomain",
+  "domain_status",
+  "domain_step",
+  "column_break_domain",
+  "domain_step_started_on",
+  "dns_record_id",
+  "domain_cleaned_on",
   "section_break_billing",
   "paid_until",
   "provider",
@@ -129,6 +137,60 @@
    "fieldtype": "Datetime",
    "label": "Rotation Started On",
    "read_only": 1
+  },
+  {
+   "fieldname": "section_break_domain",
+   "fieldtype": "Section Break",
+   "label": "Domain"
+  },
+  {
+   "fieldname": "subdomain",
+   "fieldtype": "Data",
+   "label": "Subdomain",
+   "read_only": 1,
+   "unique": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "domain_status",
+   "fieldtype": "Select",
+   "label": "Domain Status",
+   "options": "\nWorking\nActive\nFailed",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "domain_step",
+   "fieldtype": "Select",
+   "label": "Domain Step",
+   "options": "\nDNS\nFrappe Cloud\nCertificate\nPing\nPrimary\nCleanup",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "column_break_domain",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "domain_step_started_on",
+   "fieldtype": "Datetime",
+   "label": "Domain Step Started On",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "dns_record_id",
+   "fieldtype": "Data",
+   "label": "DNS Record ID",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "domain_cleaned_on",
+   "fieldtype": "Datetime",
+   "label": "Domain Cleaned On",
+   "read_only": 1,
+   "no_copy": 1
   },
   {
    "fieldname": "section_break_billing",
@@ -332,7 +394,7 @@
  "index_web_pages_for_search": 1,
  "link_display_mode": "Search",
  "links": [],
- "modified": "2026-11-20 12:00:00.000000",
+ "modified": "2026-11-21 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Rarebooks Control",
  "name": "Books Hosted Site",

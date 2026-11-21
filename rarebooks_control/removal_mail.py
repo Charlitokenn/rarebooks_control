@@ -235,7 +235,10 @@ def send_approval_list():
 
 def send_digest():
 	"""The removals and cancellations of the last day, the round's last run, the sites whose config isn't
-	Active (spec 0010 AC-16), and failed drops Frappe Cloud finished after all (spec 0011 AC-11)."""
+	Active (spec 0010 AC-16), failed drops Frappe Cloud finished after all (spec 0011 AC-11), and the sites
+	whose domain is stuck or failed (spec 0012 AC-14)."""
+	from rarebooks_control.registry import domain_digest_lines
+
 	late = reconcile_failed_drops()
 	since = utc_now() - timedelta(days=1)
 	removed = frappe.get_all(
@@ -263,6 +266,7 @@ def send_digest():
 	lines += [f"{case.name}: {case.site} ({case.mode}) {case.last_error or ''}".strip() for case in cancelled]
 	lines += [_("Sites whose config isn't Active: {0}").format(len(unconfigured))]
 	lines += [f"{row.name}: {_(row.config_status)}" for row in unconfigured]
+	lines += domain_digest_lines()
 	send_ops(_("Removal digest"), lines, now=False)
 
 

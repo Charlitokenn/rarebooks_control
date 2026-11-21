@@ -14,6 +14,7 @@ from rarebooks_control.providers import frappe_cloud
 from rarebooks_control.providers.frappe_cloud import FrappeCloudError, OutcomeUnknown
 from rarebooks_control.signing import utc_now
 from rarebooks_control.tests.control import (
+	FakeCloudflare,
 	FakeFrappeCloud,
 	SiteStub,
 	call,
@@ -47,9 +48,16 @@ class RegistryTestCase(IntegrationTestCase):
 		# Removal itself stays off here, so the stale run alert of the ping job keeps quiet.
 		frappe.db.set_single_value(SETTINGS, "mode", "off")
 		frappe.cache.delete_keys("removal-alert:")
-		self.start(patch.dict(frappe.conf, {"books_ops_email": OPS, "books_control_public_url": CONTROL_URL}))
+		self.start(
+			patch.dict(
+				frappe.conf,
+				{"books_ops_email": OPS, "books_control_public_url": CONTROL_URL, **FakeCloudflare.CONF},
+			)
+		)
 		self.cloud = FakeFrappeCloud()
 		self.start(self.cloud.patch())
+		self.dns = FakeCloudflare()
+		self.start(self.dns.patch())
 		self.sites = SiteStub()
 		self.start(patch("rarebooks_control.site_calls.post", side_effect=self.sites))
 		self.queue_push = self.start(patch("rarebooks_control.push.queue_push"))
@@ -67,7 +75,13 @@ class RegistryTestCase(IntegrationTestCase):
 		frappe.set_user(BILLING_MANAGER)
 		try:
 			return registry.register_site(
-				**{"site": site, "owner_email": "owner@example.com", "site_url": f"https://{site}", **values}
+				**{
+					"site": site,
+					"owner_email": "owner@example.com",
+					"site_url": f"https://{site}",
+					"subdomain": site.split(".")[0],
+					**values,
+				}
 			)
 		finally:
 			frappe.set_user("Administrator")
@@ -134,7 +148,7 @@ class TestRegister(RegistryTestCase):
 		for user in (REMOVAL_MANAGER, SYSTEM_MANAGER):
 			frappe.set_user(user)
 			with self.subTest(user), self.assertRaises(frappe.PermissionError):
-				registry.register_site(NEW, "owner@example.com", f"https://{NEW}")
+				registry.register_site(NEW, "owner@example.com", f"https://{NEW}", "new")
 			for method in (registry.retry_config, registry.rotate_secret):
 				with self.subTest(user, method=method.__name__), self.assertRaises(frappe.PermissionError):
 					method(NEW)

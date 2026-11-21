@@ -3,6 +3,7 @@
 import json
 from contextlib import contextmanager
 from datetime import UTC, timedelta
+from typing import ClassVar
 from unittest.mock import patch
 
 import frappe
@@ -169,6 +170,8 @@ class SiteStub:
 		self.calls: list[tuple[str, str, dict]] = []
 		self.down: set[str] = set()
 		self.answers: dict[str, tuple[int, dict]] = {}
+		self.hosts: dict[str, str] = {}
+		self.urls: list[str] = []
 
 	def hold(self, row, secret: str | None = None):
 		self.secrets[row.name] = secret or row.get_password("control_secret")
@@ -182,11 +185,14 @@ class SiteStub:
 	def __call__(self, url, data, headers, timeout):
 		import requests
 
-		site = url.split("://", 1)[1].split("/", 1)[0]
+		host = url.split("://", 1)[1].split("/", 1)[0]
+		# A custom domain answers for the site it points at (spec 0012 AC-8).
+		site = self.hosts.get(host, host)
 		name = url.rsplit(".", 1)[1]
 		assert url.endswith(f"/api/method/frappe_books.subscription.{name}")
 		body = json.loads(data)
-		if name in self.down or site in self.down:
+		self.urls.append(url)
+		if name in self.down or site in self.down or host in self.down:
 			raise requests.ConnectionError("down")
 		secret = self.secrets.get(site)
 		echo = {"issued_at": body.get("issued_at")}
@@ -215,6 +221,12 @@ class FakeFrappeCloud:
 		self.calls: list[tuple] = []
 		self.errors: dict[str, Exception] = {}
 		self.configs: dict[str, dict] = {}
+		# Spec 0012: each site's domains, the domains whose DNS Frappe Cloud sees, and domains held by sites of
+		# other teams.
+		self.domain_rows: dict[str, list[dict]] = {}
+		self.dns_seen: set[str] = set()
+		self.elsewhere: dict[str, str] = {}
+		self.new_domain_status = "Active"
 
 	def add(self, name: str, status: str = "Active", group: str | None = GROUP):
 		self.sites[name] = {"name": name, "status": status, "group": group}
@@ -223,7 +235,17 @@ class FakeFrappeCloud:
 		from rarebooks_control.providers import frappe_cloud
 
 		return patch.multiple(
-			frappe_cloud, get_site=self.get_site, update_config=self.update_config, archive=self.archive
+			frappe_cloud,
+			get_site=self.get_site,
+			update_config=self.update_config,
+			archive=self.archive,
+			domains=self.domains,
+			domain_exists=self.domain_exists,
+			check_dns=self.check_dns,
+			add_domain=self.add_domain,
+			retry_add_domain=self.retry_add_domain,
+			set_host_name=self.set_host_name,
+			remove_domain=self.remove_domain,
 		)
 
 	def _maybe_raise(self, method: str):
@@ -237,7 +259,7 @@ class FakeFrappeCloud:
 		if name not in self.sites:
 			from rarebooks_control.providers.frappe_cloud import FrappeCloudError
 
-			raise FrappeCloudError("press.api.site.get answered HTTP 404")
+			raise FrappeCloudError("press.api.site.get answered HTTP 404", 404)
 		return dict(self.sites[name])
 
 	def update_config(self, name, config):
@@ -252,3 +274,136 @@ class FakeFrappeCloud:
 
 	def archives(self) -> int:
 		return sum(1 for call in self.calls if call[0] == "archive")
+
+	def count(self, method: str) -> int:
+		return sum(1 for call in self.calls if call[0] == method)
+
+	def _refuse(self, method: str, status: int = 417):
+		from rarebooks_control.providers.frappe_cloud import FrappeCloudError
+
+		raise FrappeCloudError(f"press.api.site.{method} answered HTTP {status}", status)
+
+	def _site(self, method: str, name: str):
+		self.calls.append((method, name))
+		self._maybe_raise(method)
+		if name not in self.sites:
+			self._refuse(method, 404)
+
+	def domains(self, name):
+		self._site("domains", name)
+		return [dict(row) for row in self.domain_rows.get(name, [])]
+
+	def domain_exists(self, domain):
+		self.calls.append(("domain_exists", domain))
+		self._maybe_raise("domain_exists")
+		for site, rows in self.domain_rows.items():
+			if any(row["domain"] == domain for row in rows):
+				return site
+		return self.elsewhere.get(domain)
+
+	def check_dns(self, name, domain):
+		self._site("check_dns", name)
+		return domain in self.dns_seen
+
+	def add_domain(self, name, domain):
+		self._site("add_domain", name)
+		if self.domain_exists(domain):
+			self._refuse("add_domain")
+		# Like Frappe Cloud, nothing is added while the DNS check fails.
+		if domain in self.dns_seen:
+			rows = self.domain_rows.setdefault(name, [])
+			rows.append({"domain": domain, "status": self.new_domain_status, "primary": False})
+
+	def retry_add_domain(self, name, domain):
+		self._site("retry_add_domain", name)
+
+	def set_host_name(self, name, domain):
+		self._site("set_host_name", name)
+		rows = self.domain_rows.get(name, [])
+		if not any(row["domain"] == domain and row["status"] == "Active" for row in rows):
+			self._refuse("set_host_name")
+		for row in rows:
+			row["primary"] = row["domain"] == domain
+
+	def remove_domain(self, name, domain):
+		self._site("remove_domain", name)
+		if self.sites[name]["status"] != "Active":
+			self._refuse("remove_domain")
+		self.domain_rows[name] = [row for row in self.domain_rows.get(name, []) if row["domain"] != domain]
+
+	def domain_status(self, name, domain, status):
+		for row in self.domain_rows.get(name, []):
+			if row["domain"] == domain:
+				row["status"] = status
+
+
+class FakeCloudflare:
+	"""Stands in for `providers.cloudflare`: one zone's records by id, every call recorded, and an exception to
+	raise per function (spec 0012 AC-13)."""
+
+	ZONE_DOMAIN = "rarebooks.cc"
+	CONF: ClassVar[dict] = {
+		"cloudflare_api_token": "cf-test-token-never-logged",
+		"cloudflare_zone_id": "zone123",
+		"books_site_domain": ZONE_DOMAIN,
+	}
+
+	def __init__(self):
+		self.records: dict[str, dict] = {}
+		self.calls: list[tuple] = []
+		self.errors: dict[str, Exception] = {}
+		self.lose_create_answer = False
+		self._next = 0
+
+	def patch(self):
+		from rarebooks_control.providers import cloudflare
+
+		return patch.multiple(
+			cloudflare,
+			find_records=self.find_records,
+			create_cname=self.create_cname,
+			delete_record=self.delete_record,
+		)
+
+	def add(self, name: str, type_: str = "CNAME", content: str = "", proxied: bool = False) -> str:
+		self._next += 1
+		record_id = f"rec{self._next}"
+		self.records[record_id] = {
+			"id": record_id,
+			"type": type_,
+			"name": name,
+			"content": content,
+			"proxied": proxied,
+		}
+		return record_id
+
+	def named(self, name: str) -> list[dict]:
+		return [dict(record) for record in self.records.values() if record["name"] == name]
+
+	def _maybe_raise(self, method: str):
+		error = self.errors.get(method)
+		if error:
+			raise error
+
+	def find_records(self, name):
+		self.calls.append(("find", name))
+		self._maybe_raise("find")
+		return self.named(name)
+
+	def create_cname(self, name, target, comment):
+		from rarebooks_control.providers.cloudflare import CloudflareError
+
+		self.calls.append(("create", name, target, comment))
+		self._maybe_raise("create")
+		if self.named(name):
+			raise CloudflareError("POST dns_records answered HTTP 400 [81053]", 400, (81053,))
+		record_id = self.add(name, "CNAME", target)
+		if self.lose_create_answer:
+			self.lose_create_answer = False
+			raise CloudflareError("POST dns_records failed: ReadTimeout")
+		return record_id
+
+	def delete_record(self, record_id):
+		self.calls.append(("delete", record_id))
+		self._maybe_raise("delete")
+		self.records.pop(record_id, None)

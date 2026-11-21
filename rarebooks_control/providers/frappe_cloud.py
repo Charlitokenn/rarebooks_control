@@ -1,10 +1,12 @@
 """The Frappe Cloud API, the only place the control site talks to it (spec 0010 AC-13, spec 0011).
 
-Three methods only: `press.api.site.get`, `press.api.site.update_config` and `press.api.site.archive`. The key,
+The methods of `press.api.site`: `get`, `update_config` and `archive` (spec 0010), and the seven domain methods
+of spec 0012 AC-13 (`domains`, `domain_exists`, `check_dns`, `add_domain`, `retry_add_domain`, `set_host_name`,
+`remove_domain`), whose names and answers were read from the open source `press` app. The key,
 secret and team come from the control site's `site_config.json` (`frappe_cloud_api_key`,
 `frappe_cloud_api_secret`, `frappe_cloud_team`). The key can act on every site of the team, so it is treated
 like a root password: no key, secret, config value or URL is ever logged or put in an error text. Tests patch
-`get_site`, `update_config` and `archive`.
+every public function.
 """
 
 import json
@@ -21,11 +23,17 @@ CONF_KEYS = ("frappe_cloud_api_key", "frappe_cloud_api_secret", "frappe_cloud_te
 # Frappe Cloud's site status once an archive has finished.
 ARCHIVED = "Archived"
 ACTIVE = "Active"
+NOT_FOUND = 404
 
 
 class FrappeCloudError(Exception):
 	"""Frappe Cloud answered with an error, or couldn't be reached before the request was sent. The text names
-	only the method and the HTTP status, never a credential or a config value."""
+	only the method and the HTTP status, never a credential or a config value. `status` is the HTTP status, or
+	None when there was no answer."""
+
+	def __init__(self, text: str, status: int | None = None):
+		super().__init__(text)
+		self.status = status
 
 
 class OutcomeUnknown(FrappeCloudError):
@@ -59,6 +67,56 @@ def archive(name: str):
 	_call("archive", {"name": name, "force": False})
 
 
+# The domain methods (spec 0012 AC-13). Frappe Cloud checks DNS itself, so `add_domain` adds nothing while
+# `check_dns` fails; `set_host_name` saves the site at once and refuses a domain that isn't `Active`.
+
+
+def domains(name: str) -> list[dict]:
+	"""The site's domains as `{domain, status, primary}`. `status` is Pending, In Progress, Active or Broken;
+	`primary` is true for the site's `host_name`."""
+	rows = _call("domains", {"name": name})
+	if not isinstance(rows, list):
+		raise FrappeCloudError("press.api.site.domains answered without a list")
+	return [
+		{
+			"domain": (row.get("domain") or "").lower(),
+			"status": row.get("status") or None,
+			"primary": bool(row.get("primary")),
+		}
+		for row in rows
+		if isinstance(row, dict)
+	]
+
+
+def domain_exists(domain: str) -> str | None:
+	"""The name of the Frappe Cloud site holding `domain`, on any team, or None."""
+	holder = _call("domain_exists", {"domain": domain})
+	return holder if isinstance(holder, str) and holder else None
+
+
+def check_dns(name: str, domain: str) -> bool:
+	"""True when Frappe Cloud sees `domain` pointing at the site."""
+	answer = _call("check_dns", {"name": name, "domain": domain})
+	return isinstance(answer, dict) and answer.get("matched") is True
+
+
+def add_domain(name: str, domain: str):
+	_call("add_domain", {"name": name, "domain": domain})
+
+
+def retry_add_domain(name: str, domain: str):
+	_call("retry_add_domain", {"name": name, "domain": domain})
+
+
+def set_host_name(name: str, domain: str):
+	"""Make `domain` the site's primary domain. Safe to repeat."""
+	_call("set_host_name", {"name": name, "domain": domain})
+
+
+def remove_domain(name: str, domain: str):
+	_call("remove_domain", {"name": name, "domain": domain})
+
+
 def _call(method: str, payload: dict):
 	path = f"press.api.site.{method}"
 	key, secret, team = _credentials()
@@ -75,7 +133,7 @@ def _call(method: str, payload: dict):
 			raise FrappeCloudError(f"{path} could not be reached") from None
 		raise OutcomeUnknown(f"{path} sent, no answer ({type(error).__name__})") from None
 	if response.status_code != 200:
-		raise FrappeCloudError(f"{path} answered HTTP {response.status_code}")
+		raise FrappeCloudError(f"{path} answered HTTP {response.status_code}", response.status_code)
 	try:
 		data = response.json()
 	except ValueError:

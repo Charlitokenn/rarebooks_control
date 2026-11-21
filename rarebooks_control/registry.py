@@ -10,7 +10,9 @@ A desk action that fails at Frappe Cloud commits what it already wrote, then rai
 already be on the site is never lost to a rollback.
 """
 
+import re
 import secrets
+from dataclasses import dataclass, field
 from datetime import timedelta
 from urllib.parse import urlsplit
 
@@ -19,8 +21,9 @@ from frappe import _
 from frappe.utils import validate_email_address
 
 from rarebooks_control import removal_mail
-from rarebooks_control.providers import frappe_cloud
-from rarebooks_control.providers.frappe_cloud import FrappeCloudError
+from rarebooks_control.providers import cloudflare, frappe_cloud
+from rarebooks_control.providers.cloudflare import CloudflareError
+from rarebooks_control.providers.frappe_cloud import FrappeCloudError, OutcomeUnknown
 from rarebooks_control.push import mark_changed
 from rarebooks_control.signing import utc_now
 from rarebooks_control.site_calls import SiteCallFailed, call_site
@@ -34,8 +37,10 @@ SITE_NAME_LENGTH = 140
 
 
 @frappe.whitelist(methods=["POST"])
-def register_site(site: str, owner_email: str, site_url: str) -> dict:
-	"""Register a Frappe Cloud site of the Books bench group, and send it its config (spec 0010 AC-10)."""
+def register_site(site: str, owner_email: str, site_url: str, subdomain: str) -> dict:
+	"""Register a Frappe Cloud site of the Books bench group, and send it its config (spec 0010 AC-10). It
+	also stores the site's subdomain, after every check, so the 5 minute job gives it its address once its
+	config is Active (spec 0012 AC-3)."""
 	frappe.only_for(BILLING_MANAGER)
 	site = (site or "").strip().lower()
 	site_url = (site_url or "").strip().rstrip("/")
@@ -60,6 +65,7 @@ def register_site(site: str, owner_email: str, site_url: str) -> dict:
 		frappe.throw(_("Frappe Cloud couldn't be asked about this site. Try again."))
 	if cloud["name"] != site or cloud["group"] != bench_group:
 		frappe.throw(_("Frappe Cloud shows no site {0} on the Books bench group.").format(site))
+	label = check_subdomain(subdomain)
 
 	row = frappe.get_doc(
 		{
@@ -69,8 +75,10 @@ def register_site(site: str, owner_email: str, site_url: str) -> dict:
 			"owner_email": owner_email,
 			"control_secret": secrets.token_hex(32),
 			"config_status": "Pending",
+			"subdomain": label,
 		}
-	).insert(ignore_permissions=True)
+	)
+	_save_label(row, label)
 	if not send_config(row.name, row.get_password("control_secret")):
 		# Spec 0011 AC-7: the row and its secret stay, Failed with no `config_sent_on`; Retry config finishes it.
 		frappe.db.set_value(SITE, row.name, {"config_status": "Failed", "config_sent_on": None})
@@ -174,6 +182,7 @@ def run_pings():
 		pluck="name",
 	):
 		_isolated(ping_rotation, name)
+	run_domain_steps()
 	removal_mail.alert_stale_run()
 
 
@@ -241,14 +250,14 @@ def _pinged(row, secret: str | None) -> bool:
 	return answer.status == 200 and answer.body.get("status") == "ok" and answer.body.get("site") == row.site
 
 
-def _isolated(task, site: str):
+def _isolated(task, site: str, what: str = "the config ping"):
 	"""One site at a time: a failure is logged and rolled back, and the others still run."""
 	try:
 		task(site)
 		frappe.db.commit()
 	except Exception:
 		frappe.db.rollback()
-		frappe.log_error(f"Registry: the config ping of {site} failed")
+		frappe.log_error(f"Registry: {what} of {site} failed")
 
 
 def _site_row(site: str):
@@ -265,3 +274,502 @@ def _is_https(value) -> bool:
 		return isinstance(value, str) and value.startswith("https://") and bool(urlsplit(value).hostname)
 	except ValueError:
 		return False
+
+
+# Custom domains (spec 0012)
+#
+# Each site gets `<subdomain>.<books_site_domain>`. The 5 minute job moves a site one step per run: DNS, Frappe
+# Cloud, Certificate, Ping, Primary. Every step reads the row `for_update` and commits before its outside call,
+# then locks the row again, checks nothing changed and writes (AC-5), so no Cloudflare, Frappe Cloud or site
+# call is made while the row is locked.
+
+LABEL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$")
+RESERVED_LABELS = frozenset(
+	{
+		"www",
+		"api",
+		"app",
+		"control",
+		"billing",
+		"pay",
+		"mail",
+		"smtp",
+		"admin",
+		"support",
+		"help",
+		"status",
+		"docs",
+		"demo",
+		"test",
+		"staging",
+	}
+)
+DOMAIN_STEPS = ("DNS", "Frappe Cloud", "Certificate", "Ping", "Primary")
+CLEANUP = "Cleanup"
+WORKING = "Working"
+DOMAIN_ACTIVE = "Active"
+DOMAIN_FAILED = "Failed"
+STEP_WAIT = timedelta(hours=2)
+CLEANUP_WAIT = timedelta(hours=24)
+DIGEST_WAIT = timedelta(minutes=30)
+CERTIFICATE_RETRY_SECONDS = 30 * 60
+WAIT_LOG_SECONDS = 3 * 60 * 60
+
+
+@frappe.whitelist(methods=["POST"])
+def add_domain(site: str, subdomain: str) -> dict:
+	"""Give a site registered before spec 0012 (demo-site, demo-us) its address (AC-4). The 5 minute job does
+	the rest."""
+	frappe.only_for(BILLING_MANAGER)
+	row = _site_row(site)
+	_check_can_add(row)
+	# The row lock is released before the clash check asks Cloudflare and Frappe Cloud (AC-5).
+	frappe.db.commit()
+	label = check_subdomain(subdomain)
+	row = _site_row(site)
+	_check_can_add(row)
+	row.subdomain = label
+	row.domain_status = None
+	_save_label(row, label)
+	return {"subdomain": label}
+
+
+@frappe.whitelist(methods=["POST"])
+def retry_domain(site: str) -> dict:
+	"""Go on from the failed step, with its 2 hour clock restarted (AC-10)."""
+	frappe.only_for(BILLING_MANAGER)
+	row = _site_row(site)
+	if row.domain_status != DOMAIN_FAILED or row.domain_step == CLEANUP:
+		frappe.throw(_("The domain of {0} hasn't failed.").format(row.name))
+	row.domain_status = WORKING
+	row.domain_step_started_on = utc_now()
+	row.save(ignore_permissions=True)
+	return {"domain_status": row.domain_status, "domain_step": row.domain_step}
+
+
+def _check_can_add(row):
+	if row.subdomain:
+		frappe.throw(_("Site {0} already has the subdomain {1}.").format(row.name, row.subdomain))
+	if _is_dropping(row.name):
+		frappe.throw(_("Site {0} is being dropped.").format(row.name))
+
+
+def check_subdomain(value) -> str:
+	"""The label, trimmed and lowercased, once it passes the rules (AC-1) and is free in the registry, in the
+	Cloudflare zone and on Frappe Cloud (AC-2). Writes nothing; refuses with a translated message."""
+	if not cloudflare.is_configured():
+		frappe.throw(_("Set the custom domain config first."))
+	label = value.strip().lower() if isinstance(value, str) else ""
+	if not LABEL_PATTERN.match(label) or label.startswith("xn--"):
+		frappe.throw(
+			_(
+				"A subdomain is 3 to 40 lowercase letters, digits and hyphens. It can't start or end with a hyphen or start with xn--."
+			)
+		)
+	if label in RESERVED_LABELS:
+		frappe.throw(_("The subdomain {0} is reserved.").format(label))
+	if frappe.db.exists(SITE, {"subdomain": label}):
+		_taken(label, _("another hosted site holds it, or held it before it was removed"))
+	domain = cloudflare.full_domain(label)
+	try:
+		records = cloudflare.find_records(domain)
+		holder = frappe_cloud.domain_exists(domain)
+	except (CloudflareError, FrappeCloudError):
+		frappe.log_error(f"Registry: couldn't ask Cloudflare or Frappe Cloud whether {domain} is free")
+		frappe.throw(
+			_("Cloudflare or Frappe Cloud couldn't be asked whether {0} is free. Try again.").format(domain)
+		)
+	if records:
+		_taken(label, _("{0} already has a DNS record").format(domain))
+	if holder:
+		_taken(label, _("Frappe Cloud already uses {0}").format(domain))
+	return label
+
+
+def _taken(label: str, reason: str):
+	frappe.throw(_("The subdomain {0} is taken: {1}.").format(label, reason))
+
+
+def _save_label(doc, label: str):
+	"""Save or insert, turning the unique index's duplicate key error into the "taken" refusal, so two
+	concurrent requests for one label can't both win (AC-2)."""
+	try:
+		if doc.is_new():
+			doc.insert(ignore_permissions=True)
+		else:
+			doc.save(ignore_permissions=True)
+	except frappe.UniqueValidationError:
+		frappe.clear_messages()
+		_taken(label, _("another hosted site holds it"))
+
+
+# The forward steps, from the 5 minute job (AC-5 to AC-8, AC-10)
+
+
+@dataclass
+class StepOutcome:
+	"""What a step's outside calls found. `done` moves the site on (with `values` written); `failure` makes it
+	Failed at once with an ops email; otherwise it waits for the next run, `reason` logged once."""
+
+	done: bool = False
+	values: dict = field(default_factory=dict)
+	failure: list[str] | None = None
+	reason: str = ""
+
+
+def run_domain_steps():
+	for row in frappe.get_all(
+		SITE,
+		filters={"status": "Active", "subdomain": ("is", "set")},
+		fields=["name", "domain_status", "domain_step"],
+	):
+		if row.domain_status in (None, "", WORKING) and row.domain_step != CLEANUP:
+			_isolated(move_domain, row.name, "the domain step")
+
+
+def move_domain(site: str):
+	"""At most one step for one site, under the AC-5 lock rule."""
+	row = frappe.get_doc(SITE, site, for_update=True)
+	if not _domain_movable(row):
+		return
+	if not _domain_eligible(row):
+		# Only time the site could move counts toward the 2 hour rule (AC-5).
+		if row.domain_status == WORKING:
+			frappe.db.set_value(SITE, site, "domain_step_started_on", utc_now())
+		return
+	if not row.domain_status:
+		row.domain_status = WORKING
+		row.domain_step = DOMAIN_STEPS[0]
+		row.domain_step_started_on = utc_now()
+		row.save(ignore_permissions=True)
+	elif utc_now() - row.domain_step_started_on >= STEP_WAIT:
+		_fail_domain(
+			row,
+			[
+				_("The step has run for 2 hours since {0} UTC without finishing.").format(
+					row.domain_step_started_on
+				)
+			],
+		)
+		return
+	step, started = row.domain_step, row.domain_step_started_on
+	frappe.db.commit()
+
+	outcome = _run_step(row, step)
+
+	row = frappe.get_doc(SITE, site, for_update=True)
+	if not (_domain_eligible(row) and row.domain_status == WORKING and row.domain_step == step):
+		return
+	if outcome.failure:
+		_fail_domain(row, outcome.failure)
+	elif outcome.done:
+		row.update(outcome.values)
+		if step == DOMAIN_STEPS[-1]:
+			# The only place `site_url` changes, with `domain_status` Active in the same transaction (AC-8).
+			row.site_url = f"https://{_domain(row)}"
+			row.domain_status = DOMAIN_ACTIVE
+			row.domain_step = None
+			row.domain_step_started_on = None
+		else:
+			row.domain_step = DOMAIN_STEPS[DOMAIN_STEPS.index(step) + 1]
+			row.domain_step_started_on = utc_now()
+		row.save(ignore_permissions=True)
+	elif removal_mail._first_alert(f"domain-wait:{site}:{step}:{started}"):
+		frappe.logger("rarebooks_control.registry").info(
+			f"Registry: the {step} step of {site} waits: {outcome.reason}"
+		)
+
+
+def _domain_movable(row) -> bool:
+	return bool(row.subdomain) and row.domain_status in (None, "", WORKING) and row.domain_step != CLEANUP
+
+
+def _domain_eligible(row) -> bool:
+	return (
+		_domain_movable(row)
+		and row.status == "Active"
+		and row.config_status == "Active"
+		and not row.pending_secret
+		and not _is_dropping(row.name)
+		and cloudflare.is_configured()
+	)
+
+
+def _fail_domain(row, lines: list[str]):
+	row.domain_status = DOMAIN_FAILED
+	row.save(ignore_permissions=True)
+	if removal_mail._first_alert(f"domain:{row.name}:{row.domain_step}:{row.domain_step_started_on}"):
+		removal_mail.ops_alert(
+			_("The {0} step of the domain of {1} failed").format(_(row.domain_step), row.name),
+			[
+				*lines,
+				_("The site keeps working on {0}.").format(row.site_url),
+				_("Open the site in Books Hosted Site and press Retry domain."),
+			],
+		)
+
+
+def _run_step(row, step: str) -> StepOutcome:
+	try:
+		return STEP_FUNCTIONS[step](row)
+	except CloudflareError as error:
+		if error.unauthorized:
+			return StepOutcome(
+				failure=[
+					_("Cloudflare refused the token ({0}). Check cloudflare_api_token.").format(error.status)
+				]
+			)
+		return StepOutcome(reason=str(error))
+	except (FrappeCloudError, SiteCallFailed) as error:
+		return StepOutcome(reason=str(error))
+
+
+def _dns_step(row) -> StepOutcome:
+	"""Adopt our DNS only CNAME to `site`, or create it; never touch any other record (AC-6)."""
+	domain = _domain(row)
+	outcome = _check_records(row, cloudflare.find_records(domain))
+	if outcome:
+		return outcome
+	try:
+		record_id = cloudflare.create_cname(domain, row.site, f"rarebooks {row.site}")
+	except CloudflareError as error:
+		if not error.exists:
+			raise
+		return _check_records(row, cloudflare.find_records(domain)) or StepOutcome(reason=str(error))
+	return StepOutcome(done=True, values={"dns_record_id": record_id})
+
+
+def _check_records(row, records: list[dict]) -> StepOutcome | None:
+	domain = _domain(row)
+	ours = [record for record in records if _is_our_cname(record, row.site)]
+	if len(ours) != len(records):
+		return StepOutcome(
+			failure=[
+				_("{0} has a DNS record that isn't the CNAME to {1}. Remove it first.").format(
+					domain, row.site
+				)
+			]
+		)
+	if any(record["proxied"] for record in ours):
+		return StepOutcome(
+			failure=[_("The CNAME of {0} is proxied on Cloudflare. Switch it to DNS only.").format(domain)]
+		)
+	if ours:
+		return StepOutcome(done=True, values={"dns_record_id": ours[0]["id"]})
+	return None
+
+
+def _frappe_cloud_step(row) -> StepOutcome:
+	"""Add the domain once Frappe Cloud sees the DNS record (AC-7)."""
+	domain = _domain(row)
+	if _cloud_domain(row):
+		return StepOutcome(done=True)
+	if not frappe_cloud.check_dns(row.site, domain):
+		return StepOutcome(reason="Frappe Cloud doesn't see the DNS record yet")
+	_check_bench_group(row.site)
+	try:
+		frappe_cloud.add_domain(row.site, domain)
+	except OutcomeUnknown:
+		raise
+	except FrappeCloudError:
+		holder = frappe_cloud.domain_exists(domain)
+		if holder and holder != row.site:
+			return StepOutcome(
+				failure=[_("Frappe Cloud says {0} is already used by another site.").format(domain)]
+			)
+		raise
+	if _cloud_domain(row):
+		return StepOutcome(done=True)
+	return StepOutcome(reason="Frappe Cloud hasn't listed the domain yet")
+
+
+def _certificate_step(row) -> StepOutcome:
+	"""Wait for the certificate; a Broken one is retried at most every 30 minutes (AC-7)."""
+	listed = _cloud_domain(row)
+	status = listed["status"] if listed else None
+	if status == "Active":
+		return StepOutcome(done=True)
+	if status == "Broken" and frappe.cache.set(
+		frappe.cache.make_key(f"domain-retry:{row.name}"), 1, ex=CERTIFICATE_RETRY_SECONDS, nx=True
+	):
+		_check_bench_group(row.site)
+		frappe_cloud.retry_add_domain(row.site, _domain(row))
+	return StepOutcome(reason=f"the domain is {status or 'not listed'} on Frappe Cloud")
+
+
+def _ping_step(row) -> StepOutcome:
+	"""A verified `control_ping` at the new address, echoing the row's `site` (AC-8)."""
+	answer = call_site(row.name, "control_ping", url=f"https://{_domain(row)}")
+	if answer.status == 200 and answer.body.get("status") == "ok" and answer.body.get("site") == row.site:
+		return StepOutcome(done=True)
+	return StepOutcome(reason=f"control_ping at the new address answered HTTP {answer.status}")
+
+
+def _primary_step(row) -> StepOutcome:
+	"""Make the domain primary on Frappe Cloud; the switch of `site_url` follows under the row lock (AC-8).
+	`set_host_name` is safe to repeat, so an unknown outcome just tries again next run."""
+	listed = _cloud_domain(row)
+	if listed and listed["primary"]:
+		return StepOutcome(done=True)
+	_check_bench_group(row.site)
+	frappe_cloud.set_host_name(row.site, _domain(row))
+	listed = _cloud_domain(row)
+	if listed and listed["primary"]:
+		return StepOutcome(done=True)
+	return StepOutcome(reason="Frappe Cloud doesn't show the domain as primary yet")
+
+
+STEP_FUNCTIONS = {
+	"DNS": _dns_step,
+	"Frappe Cloud": _frappe_cloud_step,
+	"Certificate": _certificate_step,
+	"Ping": _ping_step,
+	"Primary": _primary_step,
+}
+
+
+# Cleanup after archive (AC-11)
+
+
+def start_domain_cleanup(site: str):
+	"""Called where `archive_requested_on` is set and in `mark_removed`, in their transaction. No outside call;
+	a repeat changes nothing."""
+	row = frappe.db.get_value(
+		SITE, site, ["subdomain", "domain_cleaned_on", "domain_step"], as_dict=True, for_update=True
+	)
+	if row and row.subdomain and not row.domain_cleaned_on and row.domain_step != CLEANUP:
+		frappe.db.set_value(
+			SITE,
+			site,
+			{"domain_step": CLEANUP, "domain_status": WORKING, "domain_step_started_on": utc_now()},
+		)
+
+
+def sweep_domain_cleanup():
+	"""At the start of every hourly round, before the mode check, so it runs with removal off too."""
+	if not cloudflare.is_configured():
+		return
+	for name in frappe.get_all(
+		SITE, filters={"domain_step": CLEANUP, "domain_status": WORKING}, pluck="name"
+	):
+		_isolated(clean_domain, name, "the domain cleanup")
+
+
+def clean_domain(site: str):
+	row = frappe.get_doc(SITE, site, for_update=True)
+	if row.domain_step != CLEANUP or row.domain_status != WORKING:
+		return
+	started = row.domain_step_started_on
+	frappe.db.commit()
+
+	try:
+		dns_gone = _remove_record(row)
+		cloud_gone = _remove_cloud_domain(row)
+	except (CloudflareError, FrappeCloudError) as error:
+		frappe.logger("rarebooks_control.registry").info(
+			f"Registry: the domain cleanup of {site} waits: {error}"
+		)
+		dns_gone = cloud_gone = False
+
+	row = frappe.get_doc(SITE, site, for_update=True)
+	if row.domain_step != CLEANUP or row.domain_status != WORKING:
+		return
+	if dns_gone and cloud_gone:
+		# `subdomain` stays, so the label is never handed to anyone else (AC-2).
+		row.domain_cleaned_on = utc_now()
+		row.domain_status = None
+		row.dns_record_id = None
+		row.save(ignore_permissions=True)
+		return
+	if (
+		started
+		and utc_now() - started >= CLEANUP_WAIT
+		and removal_mail._first_alert(f"domain-cleanup:{site}:{started}")
+	):
+		removal_mail.ops_alert(
+			_("The domain of {0} isn't cleaned up").format(site),
+			[
+				_(
+					"The DNS record or the Frappe Cloud domain of {0} is still there 24 hours after its archive was requested."
+				).format(_domain(row)),
+				_("The cleanup keeps trying every hour. Check the Error Log and Cloudflare."),
+			],
+		)
+
+
+def _remove_record(row) -> bool:
+	"""Delete our CNAME. A record that isn't ours is left alone and counts as gone."""
+	if row.dns_record_id:
+		cloudflare.delete_record(row.dns_record_id)
+	for record in cloudflare.find_records(_domain(row)):
+		if _is_our_cname(record, row.site):
+			cloudflare.delete_record(record["id"])
+	return True
+
+
+def _remove_cloud_domain(row) -> bool:
+	"""Done when Frappe Cloud no longer lists the domain, or shows the site archived or not found. Frappe
+	Cloud's own archive deletes a site's domains, so no bench group check here."""
+	try:
+		cloud = frappe_cloud.get_site(row.site)
+	except FrappeCloudError as error:
+		if error.status == frappe_cloud.NOT_FOUND:
+			return True
+		raise
+	if cloud["status"] == frappe_cloud.ARCHIVED:
+		return True
+	if not _cloud_domain(row):
+		return True
+	frappe_cloud.remove_domain(row.site, _domain(row))
+	return not _cloud_domain(row)
+
+
+# Shared by the steps and cleanup
+
+
+def _domain(row) -> str:
+	return cloudflare.full_domain(row.subdomain)
+
+
+def _cloud_domain(row) -> dict | None:
+	domain = _domain(row)
+	return next((listed for listed in frappe_cloud.domains(row.site) if listed["domain"] == domain), None)
+
+
+def _is_our_cname(record: dict, site: str) -> bool:
+	content = (record.get("content") or "").lower().rstrip(".")
+	return record.get("type") == "CNAME" and content == site.lower().rstrip(".")
+
+
+def _check_bench_group(site: str):
+	"""Frappe Cloud writes go only to a site of the Books bench group, like every other call (spec 0010)."""
+	group = frappe.db.get_single_value(SETTINGS, "books_bench_group")
+	cloud = frappe_cloud.get_site(site)
+	if not group or cloud["name"] != site or cloud["group"] != group:
+		raise FrappeCloudError(f"{site} isn't a site of the Books bench group on Frappe Cloud")
+
+
+def _is_dropping(site: str) -> bool:
+	from rarebooks_control.removal import is_dropping
+
+	return is_dropping(site)
+
+
+def domain_digest_lines() -> list[str]:
+	"""Sites whose domain is Working for over 30 minutes in one step, or Failed (AC-14)."""
+	rows = frappe.get_all(
+		SITE,
+		filters={"domain_status": ("in", (WORKING, DOMAIN_FAILED))},
+		fields=["name", "domain_status", "domain_step", "domain_step_started_on"],
+		order_by="name asc",
+	)
+	since = utc_now() - DIGEST_WAIT
+	stuck = [
+		row
+		for row in rows
+		if row.domain_status == DOMAIN_FAILED
+		or (row.domain_step_started_on and row.domain_step_started_on <= since)
+	]
+	lines = [_("Sites whose domain is stuck or failed: {0}").format(len(stuck))]
+	lines += [f"{row.name}: {_(row.domain_status)} ({_(row.domain_step or '')})" for row in stuck]
+	return lines

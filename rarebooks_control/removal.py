@@ -304,6 +304,10 @@ def is_dropping(site: str) -> bool:
 def run_round():
 	"""Hourly: note the run, then one deduplicated `run_site` job per Active, configured site and per site with
 	a `Dropping` case. While `mode` is off, only the note and one log line."""
+	from rarebooks_control.registry import sweep_domain_cleanup
+
+	# Spec 0012 AC-11: the domain cleanup runs before the mode check, so it runs with removal off too.
+	sweep_domain_cleanup()
 	settings = removal_settings()
 	frappe.db.set_single_value(SETTINGS, "last_run_on", signing.utc_now())
 	removal_mail.check_dormant_days()
@@ -816,7 +820,11 @@ def save_archive_mark(name: str):
 
 
 def _write_archive_mark(name: str, when: datetime):
+	from rarebooks_control.registry import start_domain_cleanup
+
 	frappe.db.set_value(CASE, name, "archive_requested_on", when)
+	# Spec 0012 AC-11: the domain cleanup starts in the same transaction as the archive mark.
+	start_domain_cleanup(frappe.db.get_value(CASE, name, "site"))
 
 
 def drop_failed(case, error: str):
@@ -842,6 +850,10 @@ def mark_removed(case):
 		row.status = "Removed"
 		row.removed_on = now
 		row.save(ignore_permissions=True)
+	# Spec 0012 AC-11: a cleanup the archive mark didn't start starts here; a repeat changes nothing.
+	from rarebooks_control.registry import start_domain_cleanup
+
+	start_domain_cleanup(row.name)
 	frappe.db.commit()
 
 

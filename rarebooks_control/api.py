@@ -16,7 +16,7 @@ from frappe.utils import getdate, now_datetime
 from werkzeug.wrappers import Response
 
 from rarebooks_control import billing, removal, signing
-from rarebooks_control.providers import paypal
+from rarebooks_control.providers import cloudflare, paypal
 from rarebooks_control.providers.clickpesa import ClickPesaError
 from rarebooks_control.providers.paypal import PayPalError
 from rarebooks_control.rarebooks_control.doctype.books_plan.books_plan import CURRENCY_STEP
@@ -212,12 +212,18 @@ def _is_https(value) -> bool:
 
 
 def _is_return_url(value, row) -> bool:
-	"""`https://` on the host of the site's own URL, so the return can't be an open redirect (AC-5)."""
-	return (
-		_is_https(value)
-		and _is_https(row.site_url)
-		and urlsplit(value).hostname == urlsplit(row.site_url).hostname
-	)
+	"""`https://` on one of the site's own hosts, all from the registry, so the return can't be an open redirect
+	(AC-5): the host of `site_url`, its `.frappe.cloud` name, and its subdomain address. A checkout started on
+	either address, before or after the switch, comes back (spec 0012 AC-9)."""
+	if not _is_https(value):
+		return False
+	hosts = {row.site.lower()}
+	if _is_https(row.site_url):
+		hosts.add(urlsplit(row.site_url).hostname)
+	domain = cloudflare.site_domain()
+	if row.subdomain and domain:
+		hosts.add(f"{row.subdomain}.{domain}")
+	return urlsplit(value).hostname in hosts
 
 
 def _date_or_none(value):

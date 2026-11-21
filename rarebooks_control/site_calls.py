@@ -38,38 +38,44 @@ class SiteAnswer:
 	secret: str
 
 
-def call_site(site: str, name: str, payload: dict | None = None, secret: str | None = None) -> SiteAnswer:
+def call_site(
+	site: str, name: str, payload: dict | None = None, secret: str | None = None, url: str | None = None
+) -> SiteAnswer:
 	"""Call `name` on the site and return its verified answer.
+
+	`url` sends the call to another base address of the same site instead of `site_url`, with the same signing
+	and `destinations.post` rules: the domain Ping step proves the new address this way (spec 0012 AC-8).
 
 	With no `secret`, the call is signed with `control_secret`; while a rotation is pending, a 401 is tried once
 	more with `pending_secret`, since the site may already hold the new one (spec 0010 AC-12). A given `secret`
 	(the rotation's `control_ping`) is used alone.
 	"""
 	row = frappe.get_doc(SITE, site)
+	base = (url or row.site_url).rstrip("/")
 	if secret:
-		return _send(row, name, payload or {}, secret)
+		return _send(row, base, name, payload or {}, secret)
 	current = row.get_password("control_secret", raise_exception=False)
 	pending = row.get_password("pending_secret", raise_exception=False) if row.pending_secret else None
 	try:
-		answer = _send(row, name, payload or {}, current)
+		answer = _send(row, base, name, payload or {}, current)
 	except SiteCallFailed as error:
 		# A site that already holds the new secret signs its 401 with it, so the old one can't verify it.
 		if error.status == UNAUTHORIZED and pending:
-			return _send(row, name, payload or {}, pending)
+			return _send(row, base, name, payload or {}, pending)
 		raise
 	if answer.status == UNAUTHORIZED and pending:
-		return _send(row, name, payload or {}, pending)
+		return _send(row, base, name, payload or {}, pending)
 	return answer
 
 
-def _send(row, name: str, payload: dict, secret: str | None) -> SiteAnswer:
+def _send(row, base: str, name: str, payload: dict, secret: str | None) -> SiteAnswer:
 	if not secret:
 		raise SiteCallFailed(f"{name}: the site has no secret")
 	issued_at = issued_now()
 	body = dumps({**payload, "site": row.site, "issued_at": issued_at})
 	try:
 		response = post(
-			f"{row.site_url.rstrip('/')}/api/method/{METHOD_PATH}.{name}",
+			f"{base}/api/method/{METHOD_PATH}.{name}",
 			data=body,
 			headers={"Content-Type": "application/json", SIGNATURE_HEADER: sign(body, secret)},
 			timeout=TIMEOUT_SECONDS,
