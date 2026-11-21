@@ -210,6 +210,10 @@ class SiteStub:
 		return SiteResponse(200, {"status": status, **echo}, secret)
 
 
+# What `press.api.site.site_config` shows for a Password row.
+PASSWORD_MASK = "*******"
+
+
 class FakeFrappeCloud:
 	"""Stands in for `providers.frappe_cloud`: a team's sites by name, every call recorded, and an exception to
 	raise per method (spec 0010 AC-13)."""
@@ -220,7 +224,8 @@ class FakeFrappeCloud:
 		self.sites: dict[str, dict] = {}
 		self.calls: list[tuple] = []
 		self.errors: dict[str, Exception] = {}
-		self.configs: dict[str, dict] = {}
+		# Each site's config rows `{key, value, type}`, as Frappe Cloud stores them (spec 0010 AC-11).
+		self.config_rows: dict[str, list[dict]] = {}
 		# Spec 0012: each site's domains, the domains whose DNS Frappe Cloud sees, and domains held by sites of
 		# other teams.
 		self.domain_rows: dict[str, list[dict]] = {}
@@ -249,7 +254,7 @@ class FakeFrappeCloud:
 		return patch.multiple(
 			frappe_cloud,
 			get_site=self.get_site,
-			update_config=self.update_config,
+			_call=self._call,
 			archive=self.archive,
 			domains=self.domains,
 			domain_exists=self.domain_exists,
@@ -276,10 +281,51 @@ class FakeFrappeCloud:
 			raise FrappeCloudError("press.api.site.get answered HTTP 404", 404)
 		return dict(self.sites[name])
 
-	def update_config(self, name, config):
+	@property
+	def configs(self) -> dict[str, dict]:
+		"""Each site's config as `{key: value}`, read only: set rows through `config_rows`."""
+		return {site: {row["key"]: row["value"] for row in rows} for site, rows in self.config_rows.items()}
+
+	def site_config(self, name):
+		"""Like `press.api.site.site_config`: the full child rows, a Password row's value masked."""
+		self.calls.append(("site_config", name))
+		self._maybe_raise("site_config")
+		return self._shown_config(name)
+
+	def _shown_config(self, name):
+		return [
+			{"name": f"row-{i}", "idx": i, "internal": 0, "parent": name, **row}
+			| ({"value": PASSWORD_MASK} if row["type"] == "Password" else {})
+			for i, row in enumerate(self.config_rows.get(name, []), start=1)
+		]
+
+	def _call(self, method, payload):
+		"""Frappe Cloud's `site_config` and `update_config`, answered at the HTTP call so the real
+		`frappe_cloud.update_config` reads, merges and writes under test (spec 0010 AC-11, AC-12). Every other
+		public function is patched, so nothing else reaches here."""
+		name = payload["name"]
+		if method == "site_config":
+			return self.site_config(name)
+		if method != "update_config":
+			raise AssertionError(f"the fake doesn't answer press.api.site.{method}")
 		self.calls.append(("update_config", name))
 		self._maybe_raise("update_config")
-		self.configs[name] = dict(config)
+		self.replace_config(name, json.loads(payload["config"]))
+		return self._shown_config(name)
+
+	def replace_config(self, name, rows):
+		"""Like `press.api.site.update_config`, checked live on 2026-11-21: the given rows replace the whole
+		list. A masked Password keeps its stored value, and an empty value is dropped (`Site._set_configuration`)."""
+		stored = {row["key"]: row["value"] for row in self.config_rows.get(name, [])}
+		kept = []
+		for row in rows:
+			value = row["value"]
+			if row["type"] == "Password" and value == PASSWORD_MASK:
+				value = stored.get(row["key"])
+			if value is None or str(value).strip() == "":
+				continue
+			kept.append({"key": row["key"], "value": value, "type": row["type"]})
+		self.config_rows[name] = kept
 
 	def archive(self, name):
 		self.calls.append(("archive", name))

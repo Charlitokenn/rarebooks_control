@@ -1,6 +1,7 @@
 """Registration and secret rotation through the Frappe Cloud API (spec 0010 AC-10 to AC-12, AC-16; spec 0011
 AC-4 to AC-8), and the Frappe Cloud client itself (spec 0010 AC-13)."""
 
+import json
 from datetime import timedelta
 from unittest.mock import Mock, patch
 
@@ -213,7 +214,11 @@ class TestRetryConfig(RegistryTestCase):
 			},
 		)
 		self.assertEqual(self.row(row.name).config_status, "Pending")
-		self.assertEqual(self.cloud.calls, [("update_config", row.name)], "no registration checks")
+		self.assertEqual(
+			self.cloud.calls,
+			[("site_config", row.name), ("update_config", row.name)],
+			"no registration checks",
+		)
 		registry.run_pings()
 		self.assertEqual(self.row(row.name).config_status, "Active")
 
@@ -288,10 +293,8 @@ class TestRotation(RegistryTestCase):
 		self.assertEqual(self.row(row.name).get_password("control_secret"), old, "no swap")
 
 		self.take_config(row.name)
-		self.cloud.configs[row.name]["books_control_secret"] = self.row(row.name).get_password(
-			"pending_secret"
-		)
-		self.take_config(row.name)
+		# The site now holds the pending secret that replaced the one Frappe Cloud wrote.
+		self.sites.secrets[row.name] = self.row(row.name).get_password("pending_secret")
 		self.queue_push.reset_mock()
 		registry.ping_rotation(row.name)
 		registry.ping_rotation(row.name)
@@ -357,6 +360,63 @@ class TestRotation(RegistryTestCase):
 			self.assertTrue(all(secret not in (log.method or "") + (log.error or "") for log in logs))
 
 
+# Rows Frappe Cloud or the operator keeps on a hosted site, one of each type `press` stores. Frappe Cloud's
+# `update_config` replaces the whole list, so every config write must send them back (spec 0010 AC-11, AC-12).
+OTHER_ROWS = [
+	{"key": "operator_note", "value": "kept", "type": "String"},
+	{"key": "flow_server_secret", "value": "flow-secret-0123456789", "type": "Password"},
+	{"key": "installed_apps", "value": '["frappe", "frappe_books"]', "type": "JSON"},
+	{"key": "max_file_size", "value": "10485760", "type": "Number"},
+	{"key": "maintenance_mode", "value": "0", "type": "Boolean"},
+]
+
+
+class TestConfigKeepsOtherRows(RegistryTestCase):
+	def config_rows(self, site: str, secret: str) -> list[dict]:
+		return [
+			*OTHER_ROWS,
+			{"key": "books_control_url", "value": CONTROL_URL, "type": "String"},
+			{"key": "books_control_secret", "value": secret, "type": "String"},
+		]
+
+	def test_register_retry_and_rotation_keep_every_other_row_with_its_type(self):
+		# covers: 0010 AC-11, AC-12
+		self.cloud.add(NEW)
+		self.cloud.config_rows[NEW] = [dict(row) for row in OTHER_ROWS]
+		self.register()
+		secret = self.row().get_password("control_secret")
+		self.assertEqual(self.cloud.config_rows[NEW], self.config_rows(NEW, secret), "register")
+		self.take_config()
+		registry.run_pings()
+
+		self.as_billing_manager(registry.retry_config, NEW)
+		self.assertEqual(self.cloud.config_rows[NEW], self.config_rows(NEW, secret), "retry config")
+		registry.run_pings()
+		self.assertEqual(self.row().config_status, "Active")
+
+		self.as_billing_manager(registry.rotate_secret, NEW)
+		pending = self.row().get_password("pending_secret")
+		self.assertEqual(self.cloud.config_rows[NEW], self.config_rows(NEW, pending), "rotation")
+
+	def test_a_failed_read_writes_nothing_and_fails_the_config(self):
+		# covers: 0010 AC-11, 0011 AC-7
+		for error in (
+			FrappeCloudError("press.api.site.site_config answered HTTP 500", 500),
+			OutcomeUnknown("press.api.site.site_config sent, no answer"),
+		):
+			with self.subTest(type(error).__name__):
+				frappe.db.delete(SITE, NEW)
+				self.cloud.add(NEW)
+				self.cloud.config_rows[NEW] = [dict(row) for row in OTHER_ROWS]
+				self.cloud.errors["site_config"] = error
+				with self.assertRaises(frappe.ValidationError):
+					self.register()
+				frappe.db.rollback()
+				self.assertEqual(self.row().config_status, "Failed")
+				self.assertEqual(self.cloud.count("update_config"), 0)
+				self.assertEqual(self.cloud.config_rows[NEW], OTHER_ROWS)
+
+
 CLOUD_CONF = {
 	"frappe_cloud_api_key": "key-123",
 	"frappe_cloud_api_secret": "secret-456",
@@ -373,7 +433,12 @@ class UnitTestFrappeCloudClient(UnitTestCase):
 	def test_calls_the_three_methods_with_token_team_and_timeout(self):
 		# covers: 0010 AC-13, 0011 AC-3
 		with patch.dict(frappe.conf, CLOUD_CONF), patch("requests.post") as post:
-			post.return_value = self.response(body={"name": "a.app", "status": "Active", "group": "", "x": 1})
+			post.side_effect = [
+				self.response(body={"name": "a.app", "status": "Active", "group": "", "x": 1}),
+				self.response(body=[]),
+				self.response(body=[]),
+				self.response(body={}),
+			]
 			self.assertEqual(
 				frappe_cloud.get_site("a.app"), {"name": "a.app", "status": "Active", "group": None}
 			)
@@ -384,6 +449,7 @@ class UnitTestFrappeCloudClient(UnitTestCase):
 			urls,
 			[
 				"https://cloud.frappe.io/api/method/press.api.site.get",
+				"https://cloud.frappe.io/api/method/press.api.site.site_config",
 				"https://cloud.frappe.io/api/method/press.api.site.update_config",
 				"https://cloud.frappe.io/api/method/press.api.site.archive",
 			],
@@ -392,11 +458,76 @@ class UnitTestFrappeCloudClient(UnitTestCase):
 			self.assertEqual(c.kwargs["headers"]["Authorization"], "token key-123:secret-456")
 			self.assertEqual(c.kwargs["headers"]["X-Press-Team"], "team@example.com")
 			self.assertEqual(c.kwargs["timeout"], 30)
-		self.assertEqual(post.call_args_list[2].kwargs["json"], {"name": "a.app", "force": False})
+			self.assertIs(c.kwargs["allow_redirects"], False)
+		self.assertEqual(post.call_args_list[1].kwargs["json"], {"name": "a.app"})
+		self.assertEqual(post.call_args_list[3].kwargs["json"], {"name": "a.app", "force": False})
 		self.assertEqual(
-			post.call_args_list[1].kwargs["json"]["config"],
+			post.call_args_list[2].kwargs["json"]["config"],
 			'[{"key": "books_control_url", "value": "https://c", "type": "String"}]',
 		)
+
+	def test_update_config_merges_the_new_keys_over_the_rows_it_reads(self):
+		# covers: 0010 AC-11, AC-12
+		read = [
+			{
+				"name": "r1",
+				"idx": 1,
+				"internal": 0,
+				"key": "installed_apps",
+				"value": '["frappe"]',
+				"type": "JSON",
+			},
+			{
+				"name": "r2",
+				"idx": 2,
+				"internal": 0,
+				"key": "books_control_secret",
+				"value": "old",
+				"type": "String",
+			},
+			{"key": "flow_server_secret", "value": "*******", "type": "Password"},
+			{"key": "max_file_size", "value": "10", "type": "Number"},
+			{"key": "maintenance_mode", "value": "1", "type": "Boolean"},
+			{"key": "legacy_key", "value": "x", "type": ""},
+		]
+		with patch.dict(frappe.conf, CLOUD_CONF), patch("requests.post") as post:
+			post.side_effect = [self.response(body=read), self.response(body=[])]
+			frappe_cloud.update_config(
+				"a.app", {"books_control_secret": "new", "books_control_url": "https://c"}
+			)
+		self.assertEqual(
+			json.loads(post.call_args_list[1].kwargs["json"]["config"]),
+			[
+				{"key": "installed_apps", "value": '["frappe"]', "type": "JSON"},
+				{"key": "books_control_secret", "value": "new", "type": "String"},
+				# Sent masked, as read: Frappe Cloud puts the stored secret back.
+				{"key": "flow_server_secret", "value": "*******", "type": "Password"},
+				{"key": "max_file_size", "value": "10", "type": "Number"},
+				{"key": "maintenance_mode", "value": "1", "type": "Boolean"},
+				{"key": "legacy_key", "value": "x", "type": ""},
+				{"key": "books_control_url", "value": "https://c", "type": "String"},
+			],
+		)
+
+	def test_update_config_writes_nothing_when_the_read_fails(self):
+		# covers: 0010 AC-11, AC-13
+		cases = {
+			"http 500": self.response(500),
+			"read timeout": requests.ReadTimeout("t"),
+			"no answer": self.response(),
+			"not a list": self.response(body={"key": "x", "value": "y", "type": "String"}),
+			"a row without a key": self.response(body=[{"value": "v", "type": "String"}]),
+			"an unknown type": self.response(body=[{"key": "k", "value": "v", "type": "Secret"}]),
+		}
+		for name, outcome in cases.items():
+			with self.subTest(name), patch.dict(frappe.conf, CLOUD_CONF), patch("requests.post") as post:
+				post.side_effect = [outcome, self.response(body=[])]
+				with self.assertRaises(FrappeCloudError) as raised:
+					frappe_cloud.update_config("a.app", {"books_control_secret": "never-logged-secret"})
+				self.assertIs(type(raised.exception), FrappeCloudError, "a read is never an unknown outcome")
+				self.assertEqual(post.call_count, 1, "no write")
+				for value in (*CLOUD_CONF.values(), "never-logged-secret"):
+					self.assertNotIn(value, str(raised.exception))
 
 	def test_tells_a_clear_error_apart_from_an_unknown_outcome_and_leaks_nothing(self):
 		# covers: 0011 AC-1, 0010 AC-13
