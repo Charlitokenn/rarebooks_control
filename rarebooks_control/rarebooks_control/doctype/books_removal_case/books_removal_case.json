@@ -1,0 +1,374 @@
+{
+ "actions": [],
+ "autoname": "RC-.#####",
+ "creation": "2026-11-19 07:00:00",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "site",
+  "mode",
+  "kind",
+  "column_break_status",
+  "status",
+  "removal_on",
+  "owner_email",
+  "site_url",
+  "site_language",
+  "company_name",
+  "section_break_warnings",
+  "warnings",
+  "section_break_export",
+  "export_claimed_on",
+  "attempt_id",
+  "export_key",
+  "export_bytes",
+  "export_sha256",
+  "delete_export_on",
+  "column_break_export",
+  "export_email",
+  "export_queued_on",
+  "export_sent_on",
+  "hold_until",
+  "section_break_link",
+  "link_token_hash",
+  "link_expires_on",
+  "column_break_link",
+  "download_count",
+  "last_downloaded_on",
+  "section_break_drop",
+  "approved_by",
+  "approved_on",
+  "paused_by",
+  "pause_reason",
+  "column_break_drop",
+  "drop_started_on",
+  "archive_requested_on",
+  "removed_on",
+  "section_break_errors",
+  "attempts",
+  "error_runs",
+  "column_break_errors",
+  "last_error"
+ ],
+ "fields": [
+  {
+   "fieldname": "site",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Site",
+   "options": "Books Hosted Site",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "mode",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Mode",
+   "options": "dry_run\nlive",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "kind",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Kind",
+   "options": "Trial\nLapsed",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_status",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Scheduled",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Scheduled\nExporting\nHolding\nPaused\nDropping\nRemoved\nCancelled\nFailed",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "description": "The site's date. Moves only later, frozen after Scheduled",
+   "fieldname": "removal_on",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "Removal On",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "owner_email",
+   "fieldtype": "Data",
+   "label": "Owner Email",
+   "options": "Email",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "site_url",
+   "fieldtype": "Data",
+   "label": "Site URL",
+   "options": "URL",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "site_language",
+   "fieldtype": "Data",
+   "label": "Site Language",
+   "read_only": 1
+  },
+  {
+   "fieldname": "company_name",
+   "fieldtype": "Data",
+   "label": "Company Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_warnings",
+   "fieldtype": "Section Break",
+   "label": "Warnings"
+  },
+  {
+   "fieldname": "warnings",
+   "fieldtype": "Table",
+   "label": "Warnings",
+   "options": "Books Removal Warning",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_export",
+   "fieldtype": "Section Break",
+   "label": "Export"
+  },
+  {
+   "description": "UTC",
+   "fieldname": "export_claimed_on",
+   "fieldtype": "Datetime",
+   "label": "Export Claimed On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "attempt_id",
+   "fieldtype": "Data",
+   "label": "Attempt ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "export_key",
+   "fieldtype": "Data",
+   "label": "Export Key",
+   "read_only": 1
+  },
+  {
+   "fieldname": "export_bytes",
+   "fieldtype": "Int",
+   "label": "Export Bytes",
+   "read_only": 1
+  },
+  {
+   "fieldname": "export_sha256",
+   "fieldtype": "Data",
+   "label": "Export SHA256",
+   "read_only": 1
+  },
+  {
+   "fieldname": "delete_export_on",
+   "fieldtype": "Date",
+   "label": "Delete Export On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_export",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "export_email",
+   "fieldtype": "Link",
+   "label": "Export Email",
+   "options": "Email Queue",
+   "read_only": 1
+  },
+  {
+   "description": "UTC",
+   "fieldname": "export_queued_on",
+   "fieldtype": "Datetime",
+   "label": "Export Queued On",
+   "read_only": 1
+  },
+  {
+   "description": "UTC",
+   "fieldname": "export_sent_on",
+   "fieldtype": "Datetime",
+   "label": "Export Sent On",
+   "read_only": 1
+  },
+  {
+   "description": "UTC",
+   "fieldname": "hold_until",
+   "fieldtype": "Datetime",
+   "label": "Hold Until",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_link",
+   "fieldtype": "Section Break",
+   "label": "Download link"
+  },
+  {
+   "fieldname": "link_token_hash",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Link Token Hash",
+   "read_only": 1
+  },
+  {
+   "description": "UTC",
+   "fieldname": "link_expires_on",
+   "fieldtype": "Datetime",
+   "label": "Link Expires On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_link",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "download_count",
+   "fieldtype": "Int",
+   "label": "Download Count",
+   "read_only": 1
+  },
+  {
+   "description": "UTC",
+   "fieldname": "last_downloaded_on",
+   "fieldtype": "Datetime",
+   "label": "Last Downloaded On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_drop",
+   "fieldtype": "Section Break",
+   "label": "Approval and drop"
+  },
+  {
+   "fieldname": "approved_by",
+   "fieldtype": "Link",
+   "label": "Approved By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "description": "UTC",
+   "fieldname": "approved_on",
+   "fieldtype": "Datetime",
+   "label": "Approved On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "paused_by",
+   "fieldtype": "Link",
+   "label": "Paused By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "pause_reason",
+   "fieldtype": "Small Text",
+   "label": "Pause Reason",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_drop",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "UTC",
+   "fieldname": "drop_started_on",
+   "fieldtype": "Datetime",
+   "label": "Drop Started On",
+   "read_only": 1
+  },
+  {
+   "description": "When the Frappe Cloud archive was requested (spec 0011 AC-1).",
+   "fieldname": "archive_requested_on",
+   "fieldtype": "Datetime",
+   "label": "Archive Requested On",
+   "read_only": 1
+  },
+  {
+   "description": "UTC",
+   "fieldname": "removed_on",
+   "fieldtype": "Datetime",
+   "label": "Removed On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_errors",
+   "fieldtype": "Section Break",
+   "label": "Errors"
+  },
+  {
+   "default": "0",
+   "fieldname": "attempts",
+   "fieldtype": "Int",
+   "label": "Attempts",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "error_runs",
+   "fieldtype": "Int",
+   "label": "Error Runs",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_errors",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "last_error",
+   "fieldtype": "Small Text",
+   "label": "Last Error",
+   "read_only": 1
+  }
+ ],
+ "grid_page_length": 50,
+ "link_display_mode": "Search",
+ "links": [],
+ "modified": "2026-11-20 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Rarebooks Control",
+ "name": "Books Removal Case",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "report": 1,
+   "role": "Removal Manager"
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "System Manager"
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "site",
+ "track_changes": 1
+}
