@@ -24,6 +24,8 @@ The data model of the control site (spec 0008, plus the removal DocTypes from sp
 - Roles: Billing Manager writes billing data and plans; System Manager and Removal Manager only read billing data. Removal Manager edits Books Removal Settings; System Manager only reads it.
 - Books Hosted Site, Books Checkout and Books Payment Event are created only by the control site's own code, never from desk.
 - Books Removal Case is read only in desk for every role, keeps track changes, and no role deletes it. Its status changes only through `removal.py`: the signed endpoints the customer site calls (`export_ready`, `step_failed`) and the Removal Manager actions (spec 0007 AC-13, AC-17).
+- The domain fields on Books Hosted Site (`DOMAIN_FIELDS` in its controller) are read only for every role, the API included, and written only by `registry.py` and `removal.mark_removed`. `subdomain` is unique and never changes once set, and a blank one is saved as NULL, since MariaDB's unique index allows many NULLs but only one empty string (spec 0012 AC-2, AC-12).
+- `site_url` changes only at the last domain step (`Primary` in `registry.move_domain`), in the same save that sets `domain_status` to Active (spec 0012 AC-8).
 - Billing fields on Books Hosted Site sit at permlevel 1, so only a Billing Manager writes them. A new billing field needs permlevel 1 and an entry in `BILLING_FIELDS` in the test.
 - Secrets live in hidden `Password` fields (stored encrypted, kept out of Version diffs). Read them with `doc.get_password(...)`.
 - Tests subclass `frappe.tests.IntegrationTestCase` and build rows through the helpers in `tests/data_model.py`.
@@ -37,6 +39,6 @@ The data model of the control site (spec 0008, plus the removal DocTypes from sp
 
 ## Related specs
 
-Spec 0007 (trial end removal), spec 0008 (billing data model and roles), spec 0010 (Frappe Cloud hosting) and spec 0011 (archive call mark), kept outside this repo.
+Spec 0007 (trial end removal), spec 0008 (billing data model and roles), spec 0010 (Frappe Cloud hosting), spec 0011 (archive call mark), spec 0012 (custom domains) and spec 0013 (archived site proof), kept outside this repo.
 
 _Drafted by /audit from the repo, worth a quick human pass. Edit freely: once a line stops matching this draft, later runs treat it as curated and will flag rather than overwrite it._
