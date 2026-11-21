@@ -48,6 +48,7 @@ Specs are referenced by number in commits, comments and tests (for example spec 
 - Email the operator through `alerts.send_ops`, never `frappe.sendmail(now=True)`: Frappe sends that after the commit with no guard, so an SMTP outage turns a saved change into HTTP 500 and a signed endpoint loses its answer.
 - Every payment change goes through `billing.confirm_*`: lock the site row, ask the provider, then write. A webhook body alone never changes billing (spec 0008 AC-7).
 - Only `providers/clickpesa.py` talks to ClickPesa; tests patch its functions. Its credentials come from site config (`clickpesa_client_id`, `clickpesa_api_key`, `clickpesa_checksum_key`) and are never logged.
+- Only `providers/frappe_cloud.py` talks to Frappe Cloud, at `https://cloud.frappe.io` with no redirect followed (an archive must never be sent twice, spec 0011 AC-1); tests patch `get_site`, `update_config` and `archive`. Its key, secret and team come from site config (`frappe_cloud_api_key`, `frappe_cloud_api_secret`, `frappe_cloud_team`), act on every site of the team, and are never logged.
 
 ## Agent skills
 
