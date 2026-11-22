@@ -15,6 +15,9 @@ DOMAIN_FIELDS = (
 	"domain_cleaned_on",
 )
 
+# Pool sites waiting for a sign up: no owner yet, and no push, removal round or state (spec 0014 AC-20).
+POOL_UNCLAIMED = ("Building", "Ready")
+
 
 class BooksHostedSite(Document):
 	# begin: auto-generated types
@@ -45,9 +48,11 @@ class BooksHostedSite(Document):
 		last_push_error: DF.SmallText | None
 		last_pushed_on: DF.Datetime | None
 		next_push_on: DF.Datetime | None
-		owner_email: DF.Data
+		owner_email: DF.Data | None
 		paid_until: DF.Date | None
 		pending_secret: DF.Password | None
+		pool_built_on: DF.Datetime | None
+		pool_status: DF.Literal["", "Building", "Ready", "Claimed"]
 		provider: DF.Literal["", "ClickPesa", "PayPal"]
 		provider_reference: DF.Data | None
 		push_attempts: DF.Int
@@ -68,6 +73,9 @@ class BooksHostedSite(Document):
 		# Hidden, so Frappe can't mark it mandatory; every row needs its secret (spec 0008 AC-1).
 		if not self.control_secret:
 			frappe.throw(_("A hosted site needs its control secret."))
+		# A pool site has no owner until a sign up claims it (spec 0014).
+		if not self.owner_email and self.pool_status not in POOL_UNCLAIMED:
+			frappe.throw(_("A hosted site needs its owner's email."))
 		if not (self.site_url or "").startswith("https://"):
 			frappe.throw(_("The site URL must start with https://"))
 		# A ClickPesa payment always buys one year (spec 0008 AC-8, AC-14).

@@ -40,8 +40,8 @@ def get_state() -> Response:
 	if not isinstance(verified, tuple):
 		return verified
 	request, row = verified
-	if row.config_status != "Active":
-		# Spec 0011 AC-5: setup isn't finished, which is no signature failure. Signed with the verifying secret.
+	if row.config_status != "Active" or row.pool_status in ("Building", "Ready"):
+		# Spec 0011 AC-5, spec 0014 AC-20 (a pool site no sign up has claimed gets no state): setup isn't finished, which is no signature failure. Signed with the verifying secret.
 		return request.answer({"refusal": "config_pending"}, CONFLICT)
 	_store_facts(row, request.body)
 	state = {**site_state(row), "issued_at": request.issued_at}

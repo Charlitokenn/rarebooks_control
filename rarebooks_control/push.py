@@ -54,7 +54,8 @@ def push_site(site: str):
 	row = frappe.get_doc("Books Hosted Site", site, for_update=True)
 	# Spec 0010 AC-11: a site whose config isn't Active may not hold this secret yet; it stays Pending here and
 	# the sweep sends it once its ping makes it Active.
-	if row.status == "Removed" or row.config_status != "Active":
+	if row.status == "Removed" or row.config_status != "Active" or row.pool_status in ("Building", "Ready"):
+		# Spec 0014 AC-20: a pool site no one has claimed hears nothing until its claim.
 		return
 	version = row.state_version or 0
 	body = dumps({"site": row.site, "issued_at": issued_now(), **site_state(row)})
@@ -170,5 +171,11 @@ def sweep():
 		},
 		pluck="name",
 	)
+	pooled = set(
+		frappe.get_all(
+			"Books Hosted Site", filters={"pool_status": ("in", ("Building", "Ready"))}, pluck="name"
+		)
+	)
 	for site in (*pending, *due):
-		queue_push(site)
+		if site not in pooled:
+			queue_push(site)

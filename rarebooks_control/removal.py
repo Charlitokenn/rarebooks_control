@@ -328,7 +328,15 @@ def run_round():
 
 
 def round_sites() -> list[str]:
-	active = frappe.get_all(SITE, filters={"status": "Active", "config_status": "Active"}, pluck="name")
+	"""Active sites with an Active config, less the pool sites no sign up has claimed (spec 0014 AC-20), plus
+	every site with a Dropping case, Discard cases included."""
+	active = [
+		row.name
+		for row in frappe.get_all(
+			SITE, filters={"status": "Active", "config_status": "Active"}, fields=["name", "pool_status"]
+		)
+		if not in_pool(row.pool_status)
+	]
 	dropping = frappe.get_all(CASE, filters={"status": "Dropping"}, pluck="site")
 	return sorted(set(active) | set(dropping))
 
@@ -366,11 +374,20 @@ def run_site(site: str):
 		poll_drop(name)
 		return
 	row = frappe.db.get_value(
-		SITE, site, ["name", "status", "config_status", "owner_email", "site_url"], as_dict=True
+		SITE,
+		site,
+		["name", "status", "config_status", "owner_email", "site_url", "pool_status"],
+		as_dict=True,
 	)
-	if not row or row.status != "Active" or row.config_status != "Active":
+	if not row or row.status != "Active" or row.config_status != "Active" or in_pool(row.pool_status):
 		return
 	SiteRun(row, settings).run()
+
+
+def in_pool(pool_status) -> bool:
+	"""A pool site still waiting for a sign up (Building or Ready): no push, no removal case of kind Trial or
+	Lapsed, no state (spec 0014 AC-20). A Claimed site is a normal hosted site."""
+	return pool_status in ("Building", "Ready")
 
 
 def cancel_dry_runs():

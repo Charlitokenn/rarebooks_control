@@ -1,0 +1,149 @@
+{
+ "actions": [],
+ "creation": "2026-11-22 12:00:00",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "paused",
+  "pool_size",
+  "max_claims_per_day",
+  "discard_mode",
+  "column_break_pool",
+  "pool_builds_paused",
+  "pool_pause_reason",
+  "build_failures",
+  "section_break_cloud",
+  "frappe_cloud_server",
+  "frappe_cloud_plan",
+  "frappe_cloud_domain",
+  "section_break_marketing",
+  "marketing_secret",
+  "marketing_notify_url"
+ ],
+ "fields": [
+  {
+   "default": "0",
+   "description": "Refuses every new sign up with paused.",
+   "fieldname": "paused",
+   "fieldtype": "Check",
+   "label": "Paused"
+  },
+  {
+   "default": "2",
+   "description": "Ready sites kept waiting for a sign up.",
+   "fieldname": "pool_size",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Pool Size",
+   "non_negative": 1,
+   "reqd": 1
+  },
+  {
+   "default": "20",
+   "description": "More claims than this in 24 hours leave new sign ups Queued.",
+   "fieldname": "max_claims_per_day",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Max Claims Per Day",
+   "non_negative": 1,
+   "reqd": 1
+  },
+  {
+   "default": "dry_run",
+   "description": "dry_run: a discard only logs. live: a discarded site is archived on Frappe Cloud.",
+   "fieldname": "discard_mode",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Discard Mode",
+   "options": "dry_run\nlive",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_pool",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "description": "Set after two failed builds in a row. Clearing it also sets Build Failures to 0.",
+   "fieldname": "pool_builds_paused",
+   "fieldtype": "Check",
+   "label": "Pool Builds Paused"
+  },
+  {
+   "fieldname": "pool_pause_reason",
+   "fieldtype": "Small Text",
+   "label": "Pool Pause Reason",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "build_failures",
+   "fieldtype": "Int",
+   "label": "Build Failures",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_cloud",
+   "fieldtype": "Section Break",
+   "label": "Frappe Cloud"
+  },
+  {
+   "fieldname": "frappe_cloud_server",
+   "fieldtype": "Data",
+   "label": "Frappe Cloud Server"
+  },
+  {
+   "fieldname": "frappe_cloud_plan",
+   "fieldtype": "Data",
+   "label": "Frappe Cloud Plan"
+  },
+  {
+   "description": "The domain new site names get, for example frappe.cloud.",
+   "fieldname": "frappe_cloud_domain",
+   "fieldtype": "Data",
+   "label": "Frappe Cloud Domain"
+  },
+  {
+   "fieldname": "section_break_marketing",
+   "fieldtype": "Section Break",
+   "label": "Marketing site"
+  },
+  {
+   "description": "Signs every call between the marketing site and this site. Never shown.",
+   "fieldname": "marketing_secret",
+   "fieldtype": "Password",
+   "label": "Marketing Secret"
+  },
+  {
+   "description": "https only, for example https://rarebooks.cc/api/onboarding/notify.",
+   "fieldname": "marketing_notify_url",
+   "fieldtype": "Data",
+   "label": "Marketing Notify URL"
+  }
+ ],
+ "grid_page_length": 50,
+ "issingle": 1,
+ "link_display_mode": "Search",
+ "links": [],
+ "modified": "2026-11-22 16:05:34.161732",
+ "modified_by": "Administrator",
+ "module": "Rarebooks Control",
+ "name": "Books Onboarding Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "role": "Billing Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "System Manager"
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

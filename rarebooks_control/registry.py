@@ -34,6 +34,7 @@ BILLING_MANAGER = "Billing Manager"
 PING_JOB = "rarebooks_control.registry.run_pings"
 CONFIG_WAIT = timedelta(hours=1)
 SITE_NAME_LENGTH = 140
+SIGNUP = "Books Signup"
 
 
 @frappe.whitelist(methods=["POST"])
@@ -354,9 +355,15 @@ def _check_can_add(row):
 		frappe.throw(_("Site {0} is being dropped.").format(row.name))
 
 
-def check_subdomain(value) -> str:
+class SubdomainCheckUnavailable(frappe.ValidationError):
+	"""Cloudflare or Frappe Cloud couldn't be asked whether a label is free: try again, it isn't a refusal."""
+
+
+def check_subdomain(value, signup: str | None = None) -> str:
 	"""The label, trimmed and lowercased, once it passes the rules (AC-1) and is free in the registry, in the
-	Cloudflare zone and on Frappe Cloud (AC-2). Writes nothing; refuses with a translated message."""
+	Cloudflare zone and on Frappe Cloud (AC-2). Writes nothing; refuses with a translated message.
+
+	A label held by a Books Signup is taken too, other than by `signup`, the request asking (spec 0014 AC-21)."""
 	if not cloudflare.is_configured():
 		frappe.throw(_("Set the custom domain config first."))
 	label = value.strip().lower() if isinstance(value, str) else ""
@@ -370,6 +377,8 @@ def check_subdomain(value) -> str:
 		frappe.throw(_("The subdomain {0} is reserved.").format(label))
 	if frappe.db.exists(SITE, {"subdomain": label}):
 		_taken(label, _("another hosted site holds it, or held it before it was removed"))
+	if frappe.db.exists(SIGNUP, {"subdomain": label, "name": ("!=", signup or "")}):
+		_taken(label, _("a sign up holds it"))
 	domain = cloudflare.full_domain(label)
 	try:
 		records = cloudflare.find_records(domain)
@@ -377,7 +386,8 @@ def check_subdomain(value) -> str:
 	except (CloudflareError, FrappeCloudError):
 		frappe.log_error(f"Registry: couldn't ask Cloudflare or Frappe Cloud whether {domain} is free")
 		frappe.throw(
-			_("Cloudflare or Frappe Cloud couldn't be asked whether {0} is free. Try again.").format(domain)
+			_("Cloudflare or Frappe Cloud couldn't be asked whether {0} is free. Try again.").format(domain),
+			SubdomainCheckUnavailable,
 		)
 	if records:
 		_taken(label, _("{0} already has a DNS record").format(domain))
@@ -470,6 +480,11 @@ def move_domain(site: str):
 			row.domain_status = DOMAIN_ACTIVE
 			row.domain_step = None
 			row.domain_step_started_on = None
+			if row.pool_status == "Claimed":
+				# Spec 0014 AC-13: the sign up is Ready in this same transaction.
+				from rarebooks_control import onboarding
+
+				onboarding.mark_ready(row.name)
 		else:
 			row.domain_step = DOMAIN_STEPS[DOMAIN_STEPS.index(step) + 1]
 			row.domain_step_started_on = utc_now()
@@ -492,12 +507,31 @@ def _domain_eligible(row) -> bool:
 		and not row.pending_secret
 		and not _is_dropping(row.name)
 		and cloudflare.is_configured()
+		and _owner_ready(row)
 	)
+
+
+def _owner_ready(row) -> bool:
+	"""A pool site moves only once claimed, and a claimed one only once its owner step is done (spec 0014
+	AC-12). A site with a blank `pool_status` is unchanged."""
+	if not row.pool_status:
+		return True
+	if row.pool_status != "Claimed":
+		return False
+	return frappe.db.get_value(SIGNUP, {"hosted_site": row.name}, "step") == "Domain"
 
 
 def _fail_domain(row, lines: list[str]):
 	row.domain_status = DOMAIN_FAILED
 	row.save(ignore_permissions=True)
+	if row.pool_status == "Claimed":
+		# Spec 0014 AC-17: the sign up fails instead, with its own single email, not this one too.
+		from rarebooks_control import onboarding
+
+		onboarding.fail_signup_of_site(
+			row.name, [_("The {0} step of its domain failed.").format(_(row.domain_step)), *lines]
+		)
+		return
 	if removal_mail._first_alert(f"domain:{row.name}:{row.domain_step}:{row.domain_step_started_on}"):
 		removal_mail.ops_alert(
 			_("The {0} step of the domain of {1} failed").format(_(row.domain_step), row.name),

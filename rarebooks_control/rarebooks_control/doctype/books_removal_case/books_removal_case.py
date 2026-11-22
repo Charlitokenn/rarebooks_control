@@ -40,7 +40,7 @@ class BooksRemovalCase(Document):
 		export_sent_on: DF.Datetime | None
 		export_sha256: DF.Data | None
 		hold_until: DF.Datetime | None
-		kind: DF.Literal["Trial", "Lapsed"]
+		kind: DF.Literal["Trial", "Lapsed", "Discard"]
 		last_downloaded_on: DF.Datetime | None
 		last_error: DF.SmallText | None
 		link_expires_on: DF.Datetime | None

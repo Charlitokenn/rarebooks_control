@@ -1,7 +1,6 @@
 {
  "actions": [],
  "allow_bulk_edit": 1,
- "allow_rename": 0,
  "autoname": "field:site",
  "creation": "2026-11-18 21:06:35.440608",
  "doctype": "DocType",
@@ -19,6 +18,10 @@
   "config_sent_on",
   "column_break_config",
   "rotation_started_on",
+  "section_break_pool",
+  "pool_status",
+  "column_break_pool",
+  "pool_built_on",
   "section_break_domain",
   "subdomain",
   "domain_status",
@@ -77,11 +80,11 @@
    "reqd": 1
   },
   {
+   "description": "Blank only while the site is in the pool (Building or Ready).",
    "fieldname": "owner_email",
    "fieldtype": "Data",
    "label": "Owner Email",
-   "options": "Email",
-   "reqd": 1
+   "options": "Email"
   },
   {
    "fieldname": "column_break_site",
@@ -139,6 +142,32 @@
    "read_only": 1
   },
   {
+   "fieldname": "section_break_pool",
+   "fieldtype": "Section Break",
+   "label": "Pool"
+  },
+  {
+   "description": "Blank for a site registered by hand. Building and Ready sites wait for a sign up (spec 0014).",
+   "fieldname": "pool_status",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Pool Status",
+   "options": "\nBuilding\nReady\nClaimed",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "column_break_pool",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "UTC.",
+   "fieldname": "pool_built_on",
+   "fieldtype": "Datetime",
+   "label": "Pool Built On",
+   "read_only": 1
+  },
+  {
    "fieldname": "section_break_domain",
    "fieldtype": "Section Break",
    "label": "Domain"
@@ -147,25 +176,25 @@
    "fieldname": "subdomain",
    "fieldtype": "Data",
    "label": "Subdomain",
+   "no_copy": 1,
    "read_only": 1,
-   "unique": 1,
-   "no_copy": 1
+   "unique": 1
   },
   {
    "fieldname": "domain_status",
    "fieldtype": "Select",
    "label": "Domain Status",
+   "no_copy": 1,
    "options": "\nWorking\nActive\nFailed",
-   "read_only": 1,
-   "no_copy": 1
+   "read_only": 1
   },
   {
    "fieldname": "domain_step",
    "fieldtype": "Select",
    "label": "Domain Step",
+   "no_copy": 1,
    "options": "\nDNS\nFrappe Cloud\nCertificate\nPing\nPrimary\nCleanup",
-   "read_only": 1,
-   "no_copy": 1
+   "read_only": 1
   },
   {
    "fieldname": "column_break_domain",
@@ -175,22 +204,22 @@
    "fieldname": "domain_step_started_on",
    "fieldtype": "Datetime",
    "label": "Domain Step Started On",
-   "read_only": 1,
-   "no_copy": 1
+   "no_copy": 1,
+   "read_only": 1
   },
   {
    "fieldname": "dns_record_id",
    "fieldtype": "Data",
    "label": "DNS Record ID",
-   "read_only": 1,
-   "no_copy": 1
+   "no_copy": 1,
+   "read_only": 1
   },
   {
    "fieldname": "domain_cleaned_on",
    "fieldtype": "Datetime",
    "label": "Domain Cleaned On",
-   "read_only": 1,
-   "no_copy": 1
+   "no_copy": 1,
+   "read_only": 1
   },
   {
    "fieldname": "section_break_billing",
@@ -394,7 +423,7 @@
  "index_web_pages_for_search": 1,
  "link_display_mode": "Search",
  "links": [],
- "modified": "2026-11-21 12:00:00.000000",
+ "modified": "2026-11-22 16:05:34.246161",
  "modified_by": "Administrator",
  "module": "Rarebooks Control",
  "name": "Books Hosted Site",
@@ -402,106 +431,36 @@
  "owner": "Administrator",
  "permissions": [
   {
-   "amend": 0,
-   "cancel": 0,
-   "create": 0,
-   "delete": 0,
-   "email": 0,
-   "export": 0,
-   "import": 0,
-   "permlevel": 0,
-   "print": 0,
    "read": 1,
    "report": 1,
    "role": "Billing Manager",
-   "share": 0,
-   "submit": 0,
    "write": 1
   },
   {
-   "amend": 0,
-   "cancel": 0,
-   "create": 0,
-   "delete": 0,
-   "email": 0,
-   "export": 0,
-   "import": 0,
    "permlevel": 1,
-   "print": 0,
    "read": 1,
-   "report": 0,
    "role": "Billing Manager",
-   "share": 0,
-   "submit": 0,
    "write": 1
   },
   {
-   "amend": 0,
-   "cancel": 0,
-   "create": 0,
-   "delete": 0,
-   "email": 0,
-   "export": 0,
-   "import": 0,
-   "permlevel": 0,
-   "print": 0,
    "read": 1,
    "report": 1,
-   "role": "System Manager",
-   "share": 0,
-   "submit": 0,
-   "write": 0
+   "role": "System Manager"
   },
   {
-   "amend": 0,
-   "cancel": 0,
-   "create": 0,
-   "delete": 0,
-   "email": 0,
-   "export": 0,
-   "import": 0,
-   "permlevel": 0,
-   "print": 0,
    "read": 1,
    "report": 1,
-   "role": "Removal Manager",
-   "share": 0,
-   "submit": 0,
-   "write": 0
+   "role": "Removal Manager"
   },
   {
-   "amend": 0,
-   "cancel": 0,
-   "create": 0,
-   "delete": 0,
-   "email": 0,
-   "export": 0,
-   "import": 0,
    "permlevel": 1,
-   "print": 0,
    "read": 1,
-   "report": 0,
-   "role": "System Manager",
-   "share": 0,
-   "submit": 0,
-   "write": 0
+   "role": "System Manager"
   },
   {
-   "amend": 0,
-   "cancel": 0,
-   "create": 0,
-   "delete": 0,
-   "email": 0,
-   "export": 0,
-   "import": 0,
    "permlevel": 1,
-   "print": 0,
    "read": 1,
-   "report": 0,
-   "role": "Removal Manager",
-   "share": 0,
-   "submit": 0,
-   "write": 0
+   "role": "Removal Manager"
   }
  ],
  "row_format": "Dynamic",
