@@ -16,6 +16,7 @@ one guard of its own: the site's owner has never logged in, read twice, the seco
 """
 
 import hashlib
+import logging
 import re
 import secrets
 import uuid
@@ -74,6 +75,15 @@ DISCARD = "Discard"
 ONBOARDING_SETTINGS = "Books Onboarding Settings"
 # Spec 0014 AC-19: a site being discarded may still be building, or be broken, on Frappe Cloud.
 DISCARD_CLOUD_STATUSES = ("Active", "Broken", "Pending", "Installing")
+
+
+def removal_logger():
+	"""The removal log, at INFO at least. Frappe sets its loggers to ERROR (WARNING on a dev server), which would
+	drop the lines a dry run is read by: "would drop" (spec 0010) and "would discard" (spec 0014 AC-19)."""
+	logger = frappe.logger("rarebooks_control.removal")
+	if not logger.isEnabledFor(logging.INFO):
+		logger.setLevel(logging.INFO)
+	return logger
 
 
 def removal_settings():
@@ -323,7 +333,7 @@ def run_round():
 	for site in frappe.get_all(CASE, filters={"status": "Dropping", "kind": DISCARD}, pluck="site"):
 		_queue_run_site(site)
 	if settings.mode == "off":
-		frappe.logger("rarebooks_control.removal").info("Removal round skipped: mode is off")
+		removal_logger().info("Removal round skipped: mode is off")
 		return
 	for site in round_sites():
 		_queue_run_site(site)
@@ -760,7 +770,7 @@ def start_drop(name: str):
 	settings = removal_settings()
 	case = frappe.get_doc(CASE, name, for_update=True)
 	if settings.mode != "live" or case.mode != "live":
-		frappe.logger("rarebooks_control.removal").info(f"Removal: would drop {case.site}")
+		removal_logger().info(f"Removal: would drop {case.site}")
 		return
 	reason = drop_refusal(case, settings) or fresh_report_refusal(case.site)
 	if reason:
@@ -915,9 +925,7 @@ def _check_name_released(site: str):
 def log_proof(case, proof: str):
 	"""AC-7: a removal proven by the released name gets its own log line, so it stands apart from `Archived`."""
 	if proof == PROOF_RELEASED:
-		frappe.logger("rarebooks_control.removal").info(
-			f"Removal: {case.name} of {case.site} is removed: 403 and name released"
-		)
+		removal_logger().info(f"Removal: {case.name} of {case.site} is removed: 403 and name released")
 
 
 def drop_failed(case, error: str):
@@ -952,7 +960,7 @@ def mark_removed(case):
 
 
 def _wait(case, reason: str):
-	frappe.logger("rarebooks_control.removal").info(f"Removal: {case.name} waits: {reason}")
+	removal_logger().info(f"Removal: {case.name} waits: {reason}")
 	frappe.db.commit()
 
 
@@ -1080,7 +1088,7 @@ def poll_discard(name: str):
 	if case.status != "Dropping" or case.kind != DISCARD:
 		return
 	if case.mode != "live" or discard_mode() != "live":
-		frappe.logger("rarebooks_control.removal").info(f"Removal: would discard {case.site}")
+		removal_logger().info(f"Removal: would discard {case.site}")
 		return
 	try:
 		proof, cloud = site_archived(case.site, drop_started=True)

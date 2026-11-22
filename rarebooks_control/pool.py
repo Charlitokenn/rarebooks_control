@@ -130,6 +130,11 @@ def build(name: str):
 	row = frappe.db.get_value(SITE, name, ["pool_status", "status", "config_sent_on"], as_dict=True)
 	if not row or row.pool_status != "Building" or row.status != "Active" or row.config_sent_on:
 		return
+	if frappe.db.get_single_value(SETTINGS, "pool_builds_paused"):
+		# An earlier build of this run may have paused the builds (AC-16): none starts while paused (AC-15), and
+		# no site was made for this row.
+		frappe.delete_doc(SITE, name, ignore_permissions=True, force=True, delete_permanently=True)
+		return
 	label, domain = name.split(".", 1)
 	group = frappe.db.get_single_value(REMOVAL_SETTINGS, "books_bench_group")
 	plan = frappe.db.get_single_value(SETTINGS, "frappe_cloud_plan")

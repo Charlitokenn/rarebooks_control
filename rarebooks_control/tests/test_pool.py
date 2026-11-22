@@ -101,6 +101,16 @@ class TestTopUp(PoolTestCase):
 		self.assertEqual(len(pool.top_up()), 3)
 		self.assertEqual(pool.pool_count(), 6)
 
+	def test_a_pause_set_by_an_earlier_build_stops_the_rest_of_the_run(self):
+		# A run of three builds where Frappe Cloud refuses each: the second failure pauses the builds, so the third
+		# must not reach Frappe Cloud, and its row goes (no site was made for it).
+		frappe.db.set_single_value(onboarding.SETTINGS, "pool_size", 3)
+		self.cloud.errors["new"] = FrappeCloudError("press.api.site.new answered HTTP 417", 417)
+		pool.top_up()
+		self.assertEqual(self.cloud.count("new"), 2)
+		self.assertEqual(frappe.db.count(SITE, {"pool_status": "Building"}), 0)
+		self.assertEqual(frappe.db.get_single_value(onboarding.SETTINGS, "build_failures"), 2)
+
 	def test_nothing_is_built_while_paused_or_unconfigured(self):
 		frappe.db.set_single_value(onboarding.SETTINGS, "pool_builds_paused", 1)
 		self.assertEqual(pool.top_up(), [])
@@ -226,6 +236,16 @@ class TestDiscard(PoolTestCase):
 		removal.open_discard(site, "test")
 		frappe.db.commit()
 		return self.discard_case(site).name
+
+	def test_the_would_discard_line_passes_frappes_default_log_level(self):
+		# Frappe sets its loggers to ERROR (WARNING on a dev server), which drops INFO lines; the dry run line must
+		# still be written. No assertLogs here, since it lowers the level itself and hides the bug.
+		import logging
+
+		with patch.object(frappe, "log_level", None):
+			frappe.loggers.pop("rarebooks_control.removal", None)
+			logger = removal.removal_logger()
+		self.assertTrue(logger.isEnabledFor(logging.INFO))
 
 	def test_dry_run_only_logs_and_never_archives(self):
 		self.pool_site()
