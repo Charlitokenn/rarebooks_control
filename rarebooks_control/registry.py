@@ -365,7 +365,8 @@ def check_subdomain(value, signup: str | None = None) -> str:
 
 	A label held by a Books Signup is taken too, other than by `signup`, the request asking (spec 0014 AC-21)."""
 	if not cloudflare.is_configured():
-		frappe.throw(_("Set the custom domain config first."))
+		# Not a refusal of the label: nothing can be checked yet, so a sign up hears try again (spec 0014 AC-9).
+		frappe.throw(_("Set the custom domain config first."), SubdomainCheckUnavailable)
 	label = value.strip().lower() if isinstance(value, str) else ""
 	if not LABEL_PATTERN.match(label) or label.startswith("xn--"):
 		frappe.throw(

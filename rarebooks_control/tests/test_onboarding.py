@@ -173,6 +173,16 @@ class TestMarketingCalls(OnboardingTestCase):
 		self.assertEqual((status, body["refusal"]), (503, "try_again"))
 		self.assertEqual(frappe.db.count(SIGNUP), 0)
 
+	# covers: AC-2, AC-9 (found by /check verify: the operator's config message reached the visitor)
+	def test_missing_cloudflare_config_answers_try_again_on_both_endpoints(self):
+		with patch.dict(frappe.conf, {"cloudflare_api_token": ""}):
+			status, body = self.ask(onboarding.request_site, ASK)
+			self.assertEqual((status, body.get("refusal")), (503, "try_again"), body)
+			self.assertNotIn("reason", body)
+			status, body = self.ask(onboarding.check_subdomain, {"subdomain": "acme"})
+			self.assertEqual((status, body.get("refusal")), (503, "try_again"), body)
+		self.assertEqual(frappe.db.count(SIGNUP), 0)
+
 	# covers: AC-21
 	def test_a_label_held_by_a_sign_up_is_taken_for_registration_too(self):
 		self.ask(onboarding.request_site, ASK)
