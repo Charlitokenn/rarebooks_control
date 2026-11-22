@@ -196,7 +196,16 @@ def ping_pending(site: str):
 			# The site may have missed pushes while it waited.
 			if row.push_status != "Synced" or (row.pushed_version or 0) != (row.state_version or 0):
 				mark_changed(row)
+			if row.pool_status == "Building":
+				# Spec 0014 AC-15: the first verified ping makes a pool build Ready for a sign up.
+				from rarebooks_control import pool
+
+				row.pool_status = "Ready"
+				pool.became_ready()
 			row.save(ignore_permissions=True)
+		return
+	if row.pool_status == "Building":
+		# Spec 0014 AC-16: a build not Ready within its hour is discarded by the pool sweep, with its own count.
 		return
 	if row.config_sent_on and utc_now() - row.config_sent_on >= CONFIG_WAIT:
 		frappe.db.set_value(SITE, site, "config_status", "Failed")
@@ -710,10 +719,14 @@ def clean_domain(site: str):
 	if row.domain_step != CLEANUP or row.domain_status != WORKING:
 		return
 	if dns_gone and cloud_gone:
-		# `subdomain` stays, so the label is never handed to anyone else (AC-2).
+		# `subdomain` stays, so the label is never handed to anyone else (AC-2), except on a discarded site:
+		# its sign up keeps the label and may take it again (spec 0014 AC-19, AC-21).
 		row.domain_cleaned_on = utc_now()
 		row.domain_status = None
 		row.dns_record_id = None
+		if _was_discarded(site):
+			row.subdomain = None
+			row.flags.release_label = True
 		row.save(ignore_permissions=True)
 		return
 	if (
@@ -730,6 +743,12 @@ def clean_domain(site: str):
 				_("The cleanup keeps trying every hour. Check the Error Log and Cloudflare."),
 			],
 		)
+
+
+def _was_discarded(site: str) -> bool:
+	return bool(
+		frappe.db.exists("Books Removal Case", {"site": site, "kind": "Discard", "status": "Removed"})
+	)
 
 
 def _remove_record(row) -> bool:

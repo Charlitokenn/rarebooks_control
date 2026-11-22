@@ -1,8 +1,9 @@
 """The Frappe Cloud API, the only place the control site talks to it (spec 0010 AC-13, spec 0011).
 
-The methods of `press.api.site`: `get`, `update_config` and `archive` (spec 0010), and the seven domain methods
+The methods of `press.api.site`: `get`, `update_config` and `archive` (spec 0010), the seven domain methods
 of spec 0012 AC-13 (`domains`, `domain_exists`, `check_dns`, `add_domain`, `retry_add_domain`, `set_host_name`,
-`remove_domain`), whose names and answers were read from the open source `press` app. The key,
+`remove_domain`), and `new` for the warm pool (spec 0014 AC-15), whose names and answers were read from the open
+source `press` app. The key,
 secret and team come from the control site's `site_config.json` (`frappe_cloud_api_key`,
 `frappe_cloud_api_secret`, `frappe_cloud_team`). The key can act on every site of the team, so it is treated
 like a root password: no key, secret, config value or URL is ever logged or put in an error text. Tests patch
@@ -69,6 +70,28 @@ def archive(name: str):
 	"""Ask Frappe Cloud to archive the site, with `force` off. Returns nothing. Raises `OutcomeUnknown` when the
 	request was sent and no answer came, and `FrappeCloudError` on a clear failure (spec 0011 AC-1)."""
 	_call("archive", {"name": name, "force": False})
+
+
+def new_site(label: str, domain: str, group: str, plan: str, apps: list[str]) -> str:
+	"""Ask Frappe Cloud to build `<label>.<domain>` on the bench group, with `apps` installed (spec 0014 AC-15).
+
+	Read from `press.api.site.new` in the open source `press` app (2026-11-22): it takes one `site` object with
+	`name` (the label only; Frappe Cloud joins it to `domain`), `domain` (a Root Domain of Frappe Cloud),
+	`group`, `plan` and `apps`, and answers `{"site": <full name>, "job": <agent job>}`. A `server` key is
+	never sent: with one, `new` switches to its dedicated server flow, which ignores `group` and may build a
+	new bench group; without it, the site goes on a bench of `group`, which already pins the server. Confirm
+	the answer and the team key's right to create sites live before the pool is switched on (build task 1).
+
+	Returns the full site name Frappe Cloud answered. Raises `OutcomeUnknown` when the request was sent and no
+	answer came (the site may exist), and `FrappeCloudError` on a clear refusal (no site was made)."""
+	answer = _call(
+		"new", {"site": {"name": label, "domain": domain, "group": group, "plan": plan, "apps": apps}}
+	)
+	site = answer.get("site") if isinstance(answer, dict) else None
+	if not isinstance(site, str) or not site:
+		# A 200 was answered, so a site may exist: the caller keeps its row, as for an unknown outcome.
+		raise OutcomeUnknown("press.api.site.new answered without a site name")
+	return site.lower()
 
 
 # The domain methods (spec 0012 AC-13). Frappe Cloud checks DNS itself, so `add_domain` adds nothing while

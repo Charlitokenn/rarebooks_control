@@ -7,7 +7,8 @@ spec 0008 AC-5), and every answer, a 401 included, goes back through `signed_res
 A sign up becomes a Books Signup in status Queued. The claim job takes the oldest Ready pool site under a row
 lock with SKIP LOCKED, names its owner through the Books site's `claim_site` (the Owner step), and leaves the
 rest to spec 0012's five domain steps. The Primary step's transaction sets the request Ready (`mark_ready`),
-and a signed notice tells the Worker, which emails the visitor. No network call is made with a row locked
+and a signed notice tells the Worker, which emails the visitor. A request that fails (AC-17) alerts you once and
+its claimed site is discarded; only you can send it round again (`retry_signup`, AC-18). No network call is made with a row locked
 (spec 0007 lock hardening): each step reads, commits, calls, then locks again and checks nothing changed.
 """
 
@@ -22,7 +23,7 @@ from frappe import _
 from frappe.utils import validate_email_address
 from werkzeug.wrappers import Response
 
-from rarebooks_control import registry, removal_mail
+from rarebooks_control import pool, registry, removal, removal_mail
 from rarebooks_control.destinations import post
 from rarebooks_control.providers import cloudflare
 from rarebooks_control.registry import SubdomainCheckUnavailable
@@ -53,6 +54,11 @@ NOTICE_JOB = "rarebooks_control.onboarding.send_notice"
 OWNER_TRIES = 6
 NOTICE_WINDOW = timedelta(hours=24)
 CLAIM_WINDOW = timedelta(hours=24)
+# A request still Queued this long emails you once (AC-10).
+QUEUE_WAIT = timedelta(hours=1)
+# A claimed request not Ready this long fails (AC-17).
+READY_WAIT = timedelta(hours=2)
+BILLING_MANAGER = "Billing Manager"
 COMPANY_NAME_MAX = 140
 VALUE_MAX = 140
 DEFAULT_ZONE = "UTC"
@@ -294,6 +300,63 @@ def sweep():
 		queue_claim(name)
 	for name in frappe.get_all(SIGNUP, filters={"notify_status": ("is", "set")}, pluck="name"):
 		_isolated(retry_notice, name, "the notice")
+	since = utc_now() - READY_WAIT
+	for name in frappe.get_all(
+		SIGNUP, filters={"status": "Preparing", "claimed_on": ("<=", since)}, pluck="name"
+	):
+		_isolated(fail_if_slow, name, "the 2 hour check")
+	_isolated(lambda _name: alert_queue(), "the queue", "the queue alert")
+
+
+def fail_if_slow(signup: str):
+	"""A request not Ready 2 hours after its claim fails (AC-17)."""
+	row = frappe.get_doc(SIGNUP, signup, for_update=True)
+	if row.status != "Preparing" or not row.claimed_on or utc_now() - row.claimed_on < READY_WAIT:
+		return
+	fail_signup(row, [_("The site wasn't Ready 2 hours after its claim at {0} UTC.").format(row.claimed_on)])
+
+
+def alert_queue():
+	"""Over the daily cap, one email a day while it holds; each request Queued over an hour, one email naming
+	why (AC-10)."""
+	queued = frappe.get_all(
+		SIGNUP, filters={"status": "Queued"}, fields=["name", "requested_on", "queue_alerted_on"]
+	)
+	if not queued:
+		return
+	over_cap = _over_daily_cap()
+	if over_cap and removal_mail._first_alert(f"signup-cap:{utc_now().date()}"):
+		removal_mail.ops_alert(
+			_("Sign ups reached the daily cap of {0} claims").format(_daily_cap()),
+			[
+				_("{0} sign ups wait Queued until claims in the last 24 hours fall under the cap.").format(
+					len(queued)
+				),
+				_("Raise Max claims per day in Books Onboarding Settings to let them through sooner."),
+			],
+		)
+	since = utc_now() - QUEUE_WAIT
+	for row in queued:
+		if row.queue_alerted_on or not row.requested_on or row.requested_on > since:
+			continue
+		frappe.db.set_value(SIGNUP, row.name, "queue_alerted_on", utc_now())
+		removal_mail.ops_alert(
+			_("The sign up {0} has waited over an hour for a site").format(row.name),
+			[
+				_("Requested {0} UTC.").format(row.requested_on),
+				_queue_cause(over_cap),
+				_("It is claimed as soon as a Ready pool site is there and the cap allows it."),
+			],
+		)
+
+
+def _queue_cause(over_cap: bool) -> str:
+	if over_cap:
+		return _("Cause: the daily cap of {0} claims is reached.").format(_daily_cap())
+	if frappe.db.get_single_value(SETTINGS, "pool_builds_paused"):
+		reason = frappe.db.get_single_value(SETTINGS, "pool_pause_reason") or ""
+		return _("Cause: pool builds are paused. {0}").format(reason).strip()
+	return _("Cause: no Ready pool site.")
 
 
 def claim(signup: str):
@@ -345,11 +408,16 @@ def claim(signup: str):
 
 
 def _take_ready_site() -> str | None:
-	"""The oldest Ready pool site, locked; a site another claim holds is skipped, never waited for (AC-11)."""
+	"""The oldest Ready pool site, locked; a site another claim holds is skipped, never waited for (AC-11). A
+	site being discarded (AC-16) is never claimed."""
 	rows = frappe.db.sql(
-		"""select name from `tabBooks Hosted Site`
-		where pool_status = 'Ready' and status = 'Active'
-		order by pool_built_on, creation limit 1
+		"""select site.name from `tabBooks Hosted Site` site
+		where site.pool_status = 'Ready' and site.status = 'Active'
+		and not exists (
+			select 1 from `tabBooks Removal Case` c
+			where c.site = site.name and c.status not in ('Removed', 'Cancelled')
+		)
+		order by site.pool_built_on, site.creation limit 1
 		for update skip locked"""
 	)
 	return rows[0][0] if rows else None
@@ -357,15 +425,17 @@ def _take_ready_site() -> str | None:
 
 def _over_daily_cap() -> bool:
 	"""More than `max_claims_per_day` claims in the last 24 hours leave new requests Queued (AC-10)."""
-	cap = frappe.db.get_single_value(SETTINGS, "max_claims_per_day") or 0
 	claimed = frappe.db.count(SIGNUP, {"claimed_on": (">=", utc_now() - CLAIM_WINDOW)})
-	return claimed >= cap
+	return claimed >= _daily_cap()
+
+
+def _daily_cap() -> int:
+	return frappe.db.get_single_value(SETTINGS, "max_claims_per_day") or 0
 
 
 def request_pool_build():
-	"""No Ready site for a request. The pool builds itself in spec 0014 build task 7 (AC-15); until then a
-	pool site is made by hand and marked Ready, and the request waits Queued for the sweep."""
-	frappe.logger("rarebooks_control.onboarding").info("Onboarding: no Ready pool site for a Queued sign up")
+	"""No Ready site for a request: a pool build starts at once (AC-11, AC-15)."""
+	pool.request_build()
 
 
 def run_owner_step(signup: str):
@@ -432,13 +502,15 @@ def fail_signup_of_site(site: str, lines: list[str]):
 
 
 def fail_signup(row, lines: list[str]):
-	"""Failed with its reason, one ops email, and the Failed notice (AC-17). The row is saved, not committed.
-	The discard of the claimed site comes with spec 0014 build task 8 (AC-19)."""
+	"""Failed with its reason, one ops email, the Failed notice, and a Discard case for the claimed site (AC-17,
+	AC-19). The row is saved, not committed."""
 	if row.status in ("Ready", "Failed"):
 		return
 	row.status = "Failed"
 	row.failed_reason = "\n".join(lines)
 	_start_notice(row, "Failed")
+	if row.hosted_site:
+		removal.open_discard(row.hosted_site, _("Its sign up {0} failed.").format(row.name))
 	if not row.alerted_on:
 		row.alerted_on = utc_now()
 		removal_mail.ops_alert(
@@ -540,6 +612,52 @@ def send_notice(signup: str) -> bool:
 		locked.save(ignore_permissions=True)
 	frappe.db.commit()
 	return True
+
+
+# Retry (AC-18)
+
+
+@frappe.whitelist(methods=["POST"])
+def retry_signup(signup: str) -> dict:
+	"""Send a Failed request round again with the same subdomain, once its old site is discarded and the label
+	released (AC-18)."""
+	frappe.only_for(BILLING_MANAGER)
+	if not isinstance(signup, str) or not frappe.db.exists(SIGNUP, signup):
+		frappe.throw(_("No sign up {0}.").format(signup), frappe.DoesNotExistError)
+	row = frappe.get_doc(SIGNUP, signup, for_update=True)
+	if row.status != "Failed":
+		frappe.throw(_("Only a Failed sign up can be retried."))
+	if row.hosted_site:
+		refusal = _cleanup_pending(row.hosted_site)
+		if refusal:
+			frappe.throw(refusal)
+	row.update(
+		{
+			"status": "Queued",
+			"hosted_site": None,
+			"attempts": 0,
+			"step": None,
+			"failed_reason": None,
+			"alerted_on": None,
+			"notify_status": None,
+			"notified_status": None,
+			"notify_started_on": None,
+			"notify_alerted_on": None,
+		}
+	)
+	row.save(ignore_permissions=True)
+	queue_claim(row.name)
+	return {"status": row.status}
+
+
+def _cleanup_pending(site: str) -> str | None:
+	"""Why the old site still holds the request back: its Discard case isn't Removed, or its domain isn't cleaned
+	up, so its label isn't released yet."""
+	if not frappe.db.exists("Books Removal Case", {"site": site, "kind": "Discard", "status": "Removed"}):
+		return _("The old site {0} isn't discarded yet. Retry once its Discard case is Removed.").format(site)
+	if frappe.db.get_value(SITE, site, "subdomain"):
+		return _("The address of the old site {0} isn't cleaned up yet. Retry once it is.").format(site)
+	return None
 
 
 def marketing_secret() -> str | None:

@@ -258,7 +258,16 @@ class FakeFrappeCloud:
 			retry_add_domain=self.retry_add_domain,
 			set_host_name=self.set_host_name,
 			remove_domain=self.remove_domain,
+			new_site=self.new_site,
 		)
+
+	def new_site(self, label, domain, group, plan, apps):
+		"""Spec 0014 AC-15: a build starts Pending on Frappe Cloud; a test sets it Active when it is installed."""
+		name = f"{label}.{domain}"
+		self.calls.append(("new", name, group, plan, tuple(apps)))
+		self._maybe_raise("new")
+		self.add(name, status="Pending", group=group)
+		return name
 
 	def _maybe_raise(self, method: str):
 		error = self.errors.get(method)

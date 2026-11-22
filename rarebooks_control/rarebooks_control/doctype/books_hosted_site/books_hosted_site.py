@@ -112,6 +112,9 @@ class BooksHostedSite(Document):
 	def validate_subdomain_kept(self):
 		"""A subdomain, once set, is never changed or removed, so the label is never reused (spec 0012 AC-2)."""
 		before = None if self.is_new() else self.get_doc_before_save()
+		# Spec 0014 AC-19: only the domain cleanup of a discarded site releases its label.
+		if self.flags.release_label and not self.subdomain:
+			return
 		if before and before.subdomain and self.subdomain != before.subdomain:
 			frappe.throw(_("A site's subdomain can't be changed once set."))
 

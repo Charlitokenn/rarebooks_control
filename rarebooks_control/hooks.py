@@ -18,8 +18,13 @@ scheduler_events = {
 		# Spec 0008 AC-13: pushes that are pending, or failing and due.
 		"* * * * *": ["rarebooks_control.push.sweep", "rarebooks_control.billing.reconcile_allocations"],
 		# Spec 0010 AC-11, AC-16: the config ping and the stale run alert.
-		# Spec 0014 AC-10, AC-12, AC-13: the claim sweep, the Owner step and the notice retries.
-		"*/5 * * * *": ["rarebooks_control.registry.queue_pings", "rarebooks_control.onboarding.sweep"],
+		# Spec 0014 AC-10, AC-12, AC-13, AC-17: the claim sweep, the Owner step, the notice retries, the queue
+		# alerts and the 2 hour rule. AC-15, AC-16: the build poll and the ping of Ready pool sites.
+		"*/5 * * * *": [
+			"rarebooks_control.registry.queue_pings",
+			"rarebooks_control.onboarding.sweep",
+			"rarebooks_control.pool.sweep",
+		],
 	},
 	# Spec 0008 AC-10, AC-16, AC-18: checkout expiry and the ClickPesa reconcile hourly; the PayPal
 	# reconcile, the 90 day payload purge and the payment failure digest daily.
@@ -29,6 +34,8 @@ scheduler_events = {
 		"rarebooks_control.reconcile.hourly",
 		"rarebooks_control.removal_mail.hourly",
 		"rarebooks_control.removal.run_round",
+		# Spec 0014 AC-15, AC-16: stale pool sites, then the pool top up.
+		"rarebooks_control.pool.hourly",
 	],
 	"daily": ["rarebooks_control.reconcile.daily", "rarebooks_control.removal_mail.daily"],
 }

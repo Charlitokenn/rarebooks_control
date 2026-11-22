@@ -9,6 +9,10 @@ AC-20 check and every spec 0010 AC-6 guard pass in the same job, and only once `
 
 The customer site is the only clock for its dates: the control site stores the `removal_on` and `today` it
 reports, and never works out a removal date itself.
+
+A Discard case (spec 0014 AC-19) ends a pool site or a failed sign up's site: it starts `Dropping`, follows
+Books Onboarding Settings `discard_mode` rather than removal `mode`, sends no warning, export or email, and adds
+one guard of its own: the site's owner has never logged in, read twice, the second time right before the archive.
 """
 
 import hashlib
@@ -66,6 +70,10 @@ DROP_PHASES = ("locked", "lapsed")
 MARK_SAVE_TRIES = 3
 RUN_SITE = "rarebooks_control.removal.run_site"
 RUN_SITE_TIMEOUT = 15 * 60
+DISCARD = "Discard"
+ONBOARDING_SETTINGS = "Books Onboarding Settings"
+# Spec 0014 AC-19: a site being discarded may still be building, or be broken, on Frappe Cloud.
+DISCARD_CLOUD_STATUSES = ("Active", "Broken", "Pending", "Installing")
 
 
 def removal_settings():
@@ -311,20 +319,27 @@ def run_round():
 	settings = removal_settings()
 	frappe.db.set_single_value(SETTINGS, "last_run_on", signing.utc_now())
 	removal_mail.check_dormant_days()
+	# Spec 0014 AC-19, AC-20: Discard cases follow `discard_mode`, so they run whatever the removal mode.
+	for site in frappe.get_all(CASE, filters={"status": "Dropping", "kind": DISCARD}, pluck="site"):
+		_queue_run_site(site)
 	if settings.mode == "off":
 		frappe.logger("rarebooks_control.removal").info("Removal round skipped: mode is off")
 		return
 	for site in round_sites():
-		frappe.enqueue(
-			RUN_SITE,
-			queue="default",
-			timeout=RUN_SITE_TIMEOUT,
-			job_id=f"removal:{site}",
-			deduplicate=True,
-			enqueue_after_commit=True,
-			site=site,
-		)
+		_queue_run_site(site)
 	cancel_skipped_paid()
+
+
+def _queue_run_site(site: str):
+	frappe.enqueue(
+		RUN_SITE,
+		queue="default",
+		timeout=RUN_SITE_TIMEOUT,
+		job_id=f"removal:{site}",
+		deduplicate=True,
+		enqueue_after_commit=True,
+		site=site,
+	)
 
 
 def round_sites() -> list[str]:
@@ -367,10 +382,16 @@ def run_site(site: str):
 	"""One site's part of the round, in its own job. A `Dropping` case only polls Frappe Cloud (spec 0011
 	AC-10); any other site must be Active with its config Active."""
 	settings = removal_settings()
+	name = open_case(site)
+	case = frappe.db.get_value(CASE, name, ["status", "kind"], as_dict=True) if name else None
+	if case and case.kind == DISCARD:
+		# A Discard case that has stopped (Failed) waits for you; the trial rules never touch it.
+		if case.status == "Dropping":
+			poll_discard(name)
+		return
 	if settings.mode == "off":
 		return
-	name = open_case(site)
-	if name and frappe.db.get_value(CASE, name, "status") == "Dropping":
+	if case and case.status == "Dropping":
 		poll_drop(name)
 		return
 	row = frappe.db.get_value(
@@ -814,7 +835,13 @@ def poll_drop(name: str):
 
 def archive_now(case):
 	"""Call the archive for a locked `Dropping` case with no mark. A success or an unknown outcome is marked;
-	only a clear error counts a failed drop step (spec 0011 AC-1)."""
+	only a clear error counts a failed drop step (spec 0011 AC-1). A Discard case asks the site once more,
+	right before the call, whether its owner has logged in (spec 0014 AC-19)."""
+	if case.kind == DISCARD:
+		refusal = owner_refusal(case.site)
+		if refusal:
+			_owner_refused(case, refusal)
+			return
 	try:
 		frappe_cloud.archive(case.site)
 	except OutcomeUnknown:
@@ -1001,9 +1028,149 @@ def cloud_refusal(site: str, cloud: dict, settings) -> str | None:
 
 
 def drops_today() -> int:
-	"""Cases whose drop started on the current UTC date, across all sites (spec 0010 AC-9)."""
+	"""Cases whose drop started on the current UTC date, across all sites (spec 0010 AC-9). Discard cases don't
+	count (spec 0014 AC-19)."""
 	start = datetime.combine(signing.utc_now().date(), datetime.min.time())
-	return frappe.db.count(CASE, {"drop_started_on": (">=", start)})
+	return frappe.db.count(CASE, {"drop_started_on": (">=", start), "kind": ("!=", DISCARD)})
+
+
+# The Discard case (spec 0014 AC-19)
+
+
+def open_discard(site: str, reason: str) -> str | None:
+	"""Open a Discard case for a pool site or a failed sign up's site. It starts `Dropping`, so the hourly round
+	polls it; the caller commits. A site with another open case gets none, and the error is logged."""
+	other = open_case(site)
+	if other:
+		frappe.log_error(f"Removal: {site} wasn't discarded: case {other} is open", reason)
+		return None
+	row = frappe.db.get_value(SITE, site, ["owner_email", "site_url"], as_dict=True)
+	owner = row.owner_email or frappe.conf.get("books_ops_email")
+	if not owner:
+		frappe.log_error(f"Removal: {site} wasn't discarded: set books_ops_email", reason)
+		return None
+	now = signing.utc_now()
+	case = frappe.get_doc(
+		{
+			"doctype": CASE,
+			"site": site,
+			"kind": DISCARD,
+			"status": "Dropping",
+			"mode": discard_mode(),
+			"owner_email": owner,
+			"site_url": row.site_url,
+			"removal_on": now.date(),
+			# Started by us, so spec 0013's 403 plus released name can prove its archive.
+			"drop_started_on": now,
+			"attempts": 0,
+			"last_error": reason[:ERROR_CHARACTERS],
+		}
+	).insert(ignore_permissions=True)
+	return case.name
+
+
+def discard_mode() -> str:
+	return frappe.db.get_single_value(ONBOARDING_SETTINGS, "discard_mode") or "dry_run"
+
+
+def poll_discard(name: str):
+	"""One hourly job for a Discard case: in dry run only the log line. Otherwise the archive proof, every drop
+	guard that applies, the owner check, then the archive, which checks the owner once more."""
+	case = frappe.get_doc(CASE, name)
+	if case.status != "Dropping" or case.kind != DISCARD:
+		return
+	if case.mode != "live" or discard_mode() != "live":
+		frappe.logger("rarebooks_control.removal").info(f"Removal: would discard {case.site}")
+		return
+	try:
+		proof, cloud = site_archived(case.site, drop_started=True)
+	except FrappeCloudError as error:
+		drop_failed(frappe.get_doc(CASE, name, for_update=True), str(error))
+		return
+	case = frappe.get_doc(CASE, name, for_update=True)
+	if case.status != "Dropping":
+		frappe.db.commit()
+		return
+	if proof:
+		mark_removed(case)
+		log_proof(case, proof)
+		return
+	if case.archive_requested_on:
+		frappe.db.commit()
+		return
+	reason = discard_refusal(case, removal_settings(), cloud)
+	if reason:
+		_wait(case, reason)
+		return
+	# The first owner check is made with no lock held; `archive_now` makes the second.
+	frappe.db.commit()
+	refusal = owner_refusal(case.site)
+	case = frappe.get_doc(CASE, name, for_update=True)
+	if case.status != "Dropping" or case.archive_requested_on:
+		frappe.db.commit()
+		return
+	if refusal:
+		_owner_refused(case, refusal)
+		return
+	archive_now(case)
+
+
+def discard_refusal(case, settings, cloud: dict) -> str | None:
+	"""Spec 0010 AC-6's guards less the export checks, the fresh report and the daily cap; any of Frappe Cloud's
+	statuses for a site being built or broken passes (spec 0014 AC-19)."""
+	if settings.removal_paused:
+		return "removal is paused"
+	row = frappe.db.get_value(SITE, case.site, ["status", "time_zone"], as_dict=True)
+	if not row or row.status != "Active":
+		return "the site isn't active in the registry"
+	state = billing_state(case.site)
+	if paid_by_billing(case.site, site_date(signing.utc_now(), row.time_zone)):
+		return "the site is paid or exempt"
+	if state["auto_renews"]:
+		return "the site auto renews"
+	if state["checkout_in_last_24h"]:
+		return "the site has a checkout from the last 24 hours"
+	if cloud.get("name") != case.site:
+		return "Frappe Cloud answered for another site"
+	if not settings.books_bench_group or cloud.get("group") != settings.books_bench_group:
+		return "the site isn't on the Books bench group"
+	if cloud.get("status") not in DISCARD_CLOUD_STATUSES:
+		return f"the site is {cloud.get('status')} on Frappe Cloud"
+	if case.site == frappe.local.site:
+		return "the site is the control site"
+	return None
+
+
+def owner_refusal(site: str) -> tuple[bool, str] | None:
+	"""None when the site may be discarded: its verified `claim_report` shows `owner_logged_in` false, or it is a
+	Building site with no config yet to sign one. Otherwise `(logged_in, reason)`: a missing or unverified answer
+	never counts as not logged in (key invariants)."""
+	row = frappe.db.get_value(SITE, site, ["pool_status", "config_status"], as_dict=True)
+	if row and row.pool_status == "Building" and row.config_status != "Active":
+		return None
+	try:
+		answer = call_site(site, "claim_report")
+	except SiteCallFailed as error:
+		return False, str(error)
+	logged_in = answer.body.get("owner_logged_in")
+	if answer.status != OK or not isinstance(logged_in, bool):
+		return False, f"claim_report answered HTTP {answer.status} without owner_logged_in"
+	if logged_in:
+		return True, "the owner has logged in"
+	return None
+
+
+def _owner_refused(case, refusal: tuple[bool, str]):
+	"""An owner who has logged in stops the discard for good, with an ops email; a site that didn't answer counts
+	one attempt, and the third fails the case (spec 0014 AC-19). Saves and commits."""
+	logged_in, reason = refusal
+	if logged_in:
+		case.last_error = reason
+		fail(case, _("The owner of {0} has logged in, so it isn't discarded.").format(case.site))
+		case.save(ignore_permissions=True)
+		frappe.db.commit()
+		return
+	drop_failed(case, reason)
 
 
 def approval_required() -> bool:

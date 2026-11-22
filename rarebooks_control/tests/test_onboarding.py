@@ -104,7 +104,8 @@ class OnboardingTestCase(DomainTestCase):
 		"""Run the queued claim and notice jobs in turn, as the short queue would."""
 		while self.jobs:
 			method, kwargs = self.jobs.pop(0)
-			frappe.get_attr(method)(kwargs["signup"])
+			args = {key: value for key, value in kwargs.items() if key in ("signup", "site")}
+			frappe.get_attr(method)(**args)
 			frappe.db.commit()
 
 	def signup(self, name: str | None = None):
