@@ -15,6 +15,8 @@ The data model of the control site (spec 0008, plus the removal DocTypes from sp
 | `books_removal_settings/` | Single: removal `mode`, pause, approval, the daily drop cap, and `books_bench_group`, the Frappe Cloud bench group that holds the customer sites (spec 0010) |
 | `books_removal_case/` | One removal of one hosted site (spec 0007): status, export, hold, approvals. `books_removal_case.js` adds the Approve, Pause, Resume and Retry buttons |
 | `books_removal_warning/` | Child table of a case: one row per warning email sent |
+| `books_signup/` | One self serve sign up from the marketing site (spec 0014): status Queued, Claiming, Preparing, Ready or Failed, its step, and the claimed `hosted_site`. Unique on `email_key`, `clerk_user_id` and `subdomain` |
+| `books_onboarding_settings/` | Single: sign up pause, `pool_size`, the daily claim cap, `discard_mode`, the pool build pause, the Frappe Cloud server, plan and domain for new sites, and the hidden `marketing_secret` with `marketing_notify_url` (spec 0014) |
 | `../../tests/data_model.py` | Test helpers: one user per role, `make_site` |
 
 ## Conventions
@@ -36,9 +38,10 @@ The data model of the control site (spec 0008, plus the removal DocTypes from sp
 - Frappe skips Version records in tests; call `save(ignore_version=False)` when a test checks track changes.
 - Switch back with `frappe.set_user("Administrator")` in `tearDown` after a test acts as a role user.
 - `site_url` must start with `https://`.
+- `owner_email` on Books Hosted Site may be blank only while `pool_status` is Building or Ready (a warm pool site no one has claimed yet, spec 0014). Pushes, the removal round and `get_state` skip those rows.
 
 ## Related specs
 
-Spec 0007 (trial end removal), spec 0008 (billing data model and roles), spec 0010 (Frappe Cloud hosting), spec 0011 (archive call mark), spec 0012 (custom domains) and spec 0013 (archived site proof), kept outside this repo.
+Spec 0007 (trial end removal), spec 0008 (billing data model and roles), spec 0010 (Frappe Cloud hosting), spec 0011 (archive call mark), spec 0012 (custom domains), spec 0013 (archived site proof) and spec 0014 (self serve onboarding), kept in the `rarebooks-web` repo.
 
 _Drafted by /audit from the repo, worth a quick human pass. Edit freely: once a line stops matching this draft, later runs treat it as curated and will flag rather than overwrite it._
