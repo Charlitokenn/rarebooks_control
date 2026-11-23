@@ -15,7 +15,7 @@ The data model of the control site (spec 0008, plus the removal DocTypes from sp
 | `books_removal_settings/` | Single: removal `mode`, pause, approval, the daily drop cap, and `books_bench_group`, the Frappe Cloud bench group that holds the customer sites (spec 0010) |
 | `books_removal_case/` | One removal of one hosted site (spec 0007): status, export, hold, approvals. `books_removal_case.js` adds the Approve, Pause, Resume and Retry buttons |
 | `books_removal_warning/` | Child table of a case: one row per warning email sent |
-| `books_signup/` | One self serve sign up from the marketing site (spec 0014): status Queued, Claiming, Preparing, Ready or Failed, its step, and the claimed `hosted_site`. Unique on `email_key`, `clerk_user_id` and `subdomain` |
+| `books_signup/` | One self serve sign up from the marketing site (spec 0014): status Queued, Claiming, Preparing, Ready or Failed, its step, and the claimed `hosted_site`. Unique on `email_key`, `clerk_user_id` and `subdomain`. `books_signup.js` adds Retry on a Failed one for a Billing Manager (`onboarding.retry_signup`, AC-18) |
 | `books_onboarding_settings/` | Single: sign up pause, `pool_size`, the daily claim cap, `discard_mode`, the pool build pause, the Frappe Cloud server, plan and domain for new sites, and the hidden `marketing_secret` with `marketing_notify_url` (spec 0014) |
 | `../../tests/data_model.py` | Test helpers: one user per role, `make_site` |
 
@@ -26,7 +26,7 @@ The data model of the control site (spec 0008, plus the removal DocTypes from sp
 - Roles: Billing Manager writes billing data and plans; System Manager and Removal Manager only read billing data. Removal Manager edits Books Removal Settings; System Manager only reads it.
 - Books Hosted Site, Books Checkout and Books Payment Event are created only by the control site's own code, never from desk.
 - Books Removal Case is read only in desk for every role, keeps track changes, and no role deletes it. Its status changes only through `removal.py`: the signed endpoints the customer site calls (`export_ready`, `step_failed`) and the Removal Manager actions (spec 0007 AC-13, AC-17).
-- The domain fields on Books Hosted Site (`DOMAIN_FIELDS` in its controller) are read only for every role, the API included, and written only by `registry.py` and `removal.mark_removed`. `subdomain` is unique and never changes once set, and a blank one is saved as NULL, since MariaDB's unique index allows many NULLs but only one empty string (spec 0012 AC-2, AC-12).
+- The domain fields on Books Hosted Site (`DOMAIN_FIELDS` in its controller) are read only for every role, the API included, and written only by `registry.py` and `removal.mark_removed`. `subdomain` is unique and never changes once set, and a blank one is saved as NULL, since MariaDB's unique index allows many NULLs but only one empty string (spec 0012 AC-2, AC-12). The one exception: `registry.clean_domain` clears it on a site removed by a Discard case, setting `flags.release_label`, so its sign up can take the label again (spec 0014 AC-19).
 - `site_url` changes only at the last domain step (`Primary` in `registry.move_domain`), in the same save that sets `domain_status` to Active (spec 0012 AC-8).
 - Billing fields on Books Hosted Site sit at permlevel 1, so only a Billing Manager writes them. A new billing field needs permlevel 1 and an entry in `BILLING_FIELDS` in the test.
 - Secrets live in hidden `Password` fields (stored encrypted, kept out of Version diffs). Read them with `doc.get_password(...)`.
