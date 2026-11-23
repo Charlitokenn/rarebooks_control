@@ -39,6 +39,7 @@ The data model of the control site (spec 0008, plus the removal DocTypes from sp
 - Switch back with `frappe.set_user("Administrator")` in `tearDown` after a test acts as a role user.
 - `site_url` must start with `https://`.
 - `owner_email` on Books Hosted Site may be blank only while `pool_status` is Building or Ready (a warm pool site no one has claimed yet, spec 0014). Pushes, the removal round and `get_state` skip those rows.
+- A Claimed site gets no Books Removal Case of kind Trial or Lapsed until its Books Signup is Ready (spec 0014 AC-20). A Discard case (`removal.try_discard`) cancels any open Trial or Lapsed case first, unless that case is a drop under way (`Dropping`, or `archive_requested_on` set); then no Discard opens and the drop ends the site (AC-19).
 
 ## Related specs
 
