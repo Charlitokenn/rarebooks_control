@@ -137,9 +137,10 @@ def build(name: str):
 		return
 	label, domain = name.split(".", 1)
 	group = frappe.db.get_single_value(REMOVAL_SETTINGS, "books_bench_group")
+	server = frappe.db.get_single_value(SETTINGS, "frappe_cloud_server")
 	plan = frappe.db.get_single_value(SETTINGS, "frappe_cloud_plan")
 	try:
-		answered = frappe_cloud.new_site(label, domain, group, plan, APPS)
+		answered = frappe_cloud.new_site(label, domain, group, server, plan, APPS)
 	except OutcomeUnknown as error:
 		frappe.log_error(f"Pool: the build of {name} was sent with no clear answer", str(error))
 		return
@@ -257,7 +258,11 @@ def _being_discarded(site: str) -> bool:
 
 
 def _missing_settings(settings: dict) -> list[str]:
-	missing = [field for field in ("frappe_cloud_plan", "frappe_cloud_domain") if not settings.get(field)]
+	missing = [
+		field
+		for field in ("frappe_cloud_server", "frappe_cloud_plan", "frappe_cloud_domain")
+		if not settings.get(field)
+	]
 	if not frappe.db.get_single_value(REMOVAL_SETTINGS, "books_bench_group"):
 		missing.append("books_bench_group")
 	if not registry.control_public_url():

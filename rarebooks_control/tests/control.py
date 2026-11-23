@@ -261,10 +261,10 @@ class FakeFrappeCloud:
 			new_site=self.new_site,
 		)
 
-	def new_site(self, label, domain, group, plan, apps):
+	def new_site(self, label, domain, group, server, plan, apps):
 		"""Spec 0014 AC-15: a build starts Pending on Frappe Cloud; a test sets it Active when it is installed."""
 		name = f"{label}.{domain}"
-		self.calls.append(("new", name, group, plan, tuple(apps)))
+		self.calls.append(("new", name, group, server, plan, tuple(apps)))
 		self._maybe_raise("new")
 		self.add(name, status="Pending", group=group)
 		return name

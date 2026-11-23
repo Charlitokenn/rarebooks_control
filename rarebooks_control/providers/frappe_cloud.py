@@ -2,8 +2,9 @@
 
 The methods of `press.api.site`: `get`, `update_config` and `archive` (spec 0010), the seven domain methods
 of spec 0012 AC-13 (`domains`, `domain_exists`, `check_dns`, `add_domain`, `retry_add_domain`, `set_host_name`,
-`remove_domain`), and `new` for the warm pool (spec 0014 AC-15), whose names and answers were read from the open
-source `press` app. The key,
+`remove_domain`), and `new` for the warm pool (spec 0014 AC-15), with `press.api.bench.get` and
+`press.api.server.get` read only to fill `new`'s version and cluster. Names and answers were read from the open
+source `press` app and checked live. The key,
 secret and team come from the control site's `site_config.json` (`frappe_cloud_api_key`,
 `frappe_cloud_api_secret`, `frappe_cloud_team`). The key can act on every site of the team, so it is treated
 like a root password: no key, secret, config value or URL is ever logged or put in an error text. Tests patch
@@ -72,26 +73,60 @@ def archive(name: str):
 	_call("archive", {"name": name, "force": False})
 
 
-def new_site(label: str, domain: str, group: str, plan: str, apps: list[str]) -> str:
-	"""Ask Frappe Cloud to build `<label>.<domain>` on the bench group, with `apps` installed (spec 0014 AC-15).
+def new_site(label: str, domain: str, group: str, server: str, plan: str, apps: list[str]) -> str:
+	"""Ask Frappe Cloud to build `<label>.<domain>` on a bench of `group` on `server`, with `apps` installed
+	(spec 0014 AC-15).
 
-	Read from `press.api.site.new` in the open source `press` app (2026-11-22): it takes one `site` object with
-	`name` (the label only; Frappe Cloud joins it to `domain`), `domain` (a Root Domain of Frappe Cloud),
-	`group`, `plan` and `apps`, and answers `{"site": <full name>, "job": <agent job>}`. A `server` key is
-	never sent: with one, `new` switches to its dedicated server flow, which ignores `group` and may build a
-	new bench group; without it, the site goes on a bench of `group`, which already pins the server. Confirm
-	the answer and the team key's right to create sites live before the pool is switched on (build task 1).
+	Confirmed live on 2026-11-23 (build task 1): `press.api.site.new` takes one `site` object with `name` (the
+	label only; Frappe Cloud joins it to `domain`), `domain`, `group`, `server`, `cluster`, `version`, `plan` and
+	`apps` (app names), and answers `{"site": <full name>, "job": <agent job>}`; the team key may create sites,
+	and a site was Active on the group in under a minute. Three facts from that run shape the call:
+	- Without `server`, a plan with private bench support (the Hetzner plans) skips `group` and makes a whole new
+	  bench through a Site Group Deploy. With `server` and `version`, `new` reuses the team's bench of the same
+	  version on that server holding every app in `apps`, which is `group`'s own bench.
+	- The site's `cluster` must equal the bench's, or Frappe Cloud refuses ("cannot be deployed on None").
+	- So `version` is read from the group (`press.api.bench.get`) and `cluster` from the server's region
+	  (`press.api.server.get`) just before the call. Both reads send nothing that builds; a failed read raises
+	  `FrappeCloudError`, and no site was made.
 
 	Returns the full site name Frappe Cloud answered. Raises `OutcomeUnknown` when the request was sent and no
 	answer came (the site may exist), and `FrappeCloudError` on a clear refusal (no site was made)."""
-	answer = _call(
-		"new", {"site": {"name": label, "domain": domain, "group": group, "plan": plan, "apps": apps}}
-	)
-	site = answer.get("site") if isinstance(answer, dict) else None
-	if not isinstance(site, str) or not site:
+	version, cluster = _bench_version(group), _server_cluster(server)
+	site = {
+		"name": label,
+		"domain": domain,
+		"group": group,
+		"server": server,
+		"cluster": cluster,
+		"version": version,
+		"plan": plan,
+		"apps": apps,
+	}
+	answer = _call("new", {"site": site})
+	name = answer.get("site") if isinstance(answer, dict) else None
+	if not isinstance(name, str) or not name:
 		# A 200 was answered, so a site may exist: the caller keeps its row, as for an unknown outcome.
 		raise OutcomeUnknown("press.api.site.new answered without a site name")
-	return site.lower()
+	return name.lower()
+
+
+def _bench_version(group: str) -> str:
+	"""The Frappe version of the team's bench group, for example `Version 16`."""
+	bench = _call("get", {"name": group}, module="bench")
+	version = bench.get("version") if isinstance(bench, dict) else None
+	if not isinstance(version, str) or not version:
+		raise FrappeCloudError("press.api.bench.get answered without a version")
+	return version
+
+
+def _server_cluster(server: str) -> str:
+	"""The cluster of the team's server, read from its region, for example `Falkenstein-3`."""
+	details = _call("get", {"name": server}, module="server")
+	region = details.get("region_info") if isinstance(details, dict) else None
+	cluster = region.get("name") if isinstance(region, dict) else None
+	if not isinstance(cluster, str) or not cluster:
+		raise FrappeCloudError("press.api.server.get answered without a region")
+	return cluster
 
 
 # The domain methods (spec 0012 AC-13). Frappe Cloud checks DNS itself, so `add_domain` adds nothing while
@@ -152,8 +187,8 @@ def remove_domain(name: str, domain: str):
 	_call("remove_domain", {"name": name, "domain": domain})
 
 
-def _call(method: str, payload: dict):
-	path = f"press.api.site.{method}"
+def _call(method: str, payload: dict, module: str = "site"):
+	path = f"press.api.{module}.{method}"
 	key, secret, team = _credentials()
 	try:
 		response = requests.post(

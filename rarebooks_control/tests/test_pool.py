@@ -3,11 +3,13 @@ Building poll into config and ping, failed builds and their pause, silent and st
 with its owner guard and label release, the 2 hour rule, the queue alerts and Retry."""
 
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import frappe
+from frappe.tests import UnitTestCase
 
 from rarebooks_control import onboarding, pool, registry, removal
+from rarebooks_control.providers import frappe_cloud
 from rarebooks_control.providers.frappe_cloud import FrappeCloudError, OutcomeUnknown
 from rarebooks_control.signing import utc_now
 from rarebooks_control.tests.test_onboarding import ASK, CLERK, POOL, SIGNUP, OnboardingTestCase
@@ -16,6 +18,7 @@ from rarebooks_control.tests.test_registry import SITE
 CASE = "Books Removal Case"
 DOMAIN = "frappe.cloud"
 PLAN = "books-plan"
+SERVER = "books-server.frappe.cloud"
 CLOUD_KEYS = {"frappe_cloud_api_key": "k", "frappe_cloud_api_secret": "s", "frappe_cloud_team": "t"}
 NOT_LOGGED_IN = (200, {"owner_email": "asha.mrema@gmail.com", "owner_logged_in": False})
 
@@ -27,6 +30,7 @@ class PoolTestCase(OnboardingTestCase):
 		frappe.db.set_single_value(
 			onboarding.SETTINGS,
 			{
+				"frappe_cloud_server": SERVER,
 				"frappe_cloud_plan": PLAN,
 				"frappe_cloud_domain": DOMAIN,
 				"pool_builds_paused": 0,
@@ -64,11 +68,11 @@ class TestTopUp(PoolTestCase):
 	def test_builds_up_to_pool_size_plus_queued_with_each_row_committed_first(self):
 		seen = []
 
-		def committed_first(label, domain, group, plan, apps):
+		def committed_first(label, domain, group, server, plan, apps):
 			name = f"{label}.{domain}"
 			# The row is already written when Frappe Cloud is asked for the site.
 			seen.append(frappe.db.get_value(SITE, name, ["pool_status", "config_status"]))
-			return original(label, domain, group, plan, apps)
+			return original(label, domain, group, server, plan, apps)
 
 		original = self.cloud.new_site
 		with patch("rarebooks_control.providers.frappe_cloud.new_site", side_effect=committed_first):
@@ -82,7 +86,9 @@ class TestTopUp(PoolTestCase):
 			self.assertEqual((row.status, row.owner_email or None, row.subdomain), ("Active", None, None))
 			self.assertEqual(len(row.get_password("control_secret")), 64)
 		calls = [call for call in self.cloud.calls if call[0] == "new"]
-		self.assertEqual({call[2:] for call in calls}, {("books-group", PLAN, ("frappe", "frappe_books"))})
+		self.assertEqual(
+			{call[2:] for call in calls}, {("books-group", SERVER, PLAN, ("frappe", "frappe_books"))}
+		)
 		# Full already: a second run builds nothing.
 		self.assertEqual(pool.top_up(), [])
 
@@ -437,3 +443,55 @@ class TestQueueAlerts(PoolTestCase):
 			onboarding.SETTINGS, {"pool_builds_paused": 1, "pool_pause_reason": "two failed builds"}
 		)
 		self.assertIn("two failed builds", onboarding._queue_cause(False))
+
+
+class UnitTestNewSite(UnitTestCase):
+	def answer(self, message, status=200):
+		response = Mock(status_code=status)
+		response.json.return_value = {"message": message}
+		return response
+
+	# covers: AC-15
+	def test_new_sends_server_cluster_and_version_read_from_the_server_and_group(self):
+		answers = {
+			"press.api.bench.get": self.answer({"name": "books-group", "version": "Version 16"}),
+			"press.api.server.get": self.answer({"name": SERVER, "region_info": {"name": "Falkenstein-3"}}),
+			"press.api.site.new": self.answer({"site": "RB-0A1B2C3D.frappe.cloud", "job": "j"}),
+		}
+		with (
+			patch.dict(frappe.conf, CLOUD_KEYS),
+			patch("rarebooks_control.providers.frappe_cloud.requests.post") as post,
+		):
+			post.side_effect = lambda url, **kwargs: answers[url.rsplit("/", 1)[1]]
+			name = frappe_cloud.new_site("rb-0a1b2c3d", DOMAIN, "books-group", SERVER, PLAN, ["frappe", "x"])
+		self.assertEqual(name, "rb-0a1b2c3d.frappe.cloud")
+		self.assertEqual(
+			post.call_args.kwargs["json"],
+			{
+				"site": {
+					"name": "rb-0a1b2c3d",
+					"domain": DOMAIN,
+					"group": "books-group",
+					"server": SERVER,
+					"cluster": "Falkenstein-3",
+					"version": "Version 16",
+					"plan": PLAN,
+					"apps": ["frappe", "x"],
+				}
+			},
+		)
+		self.assertFalse(post.call_args.kwargs["allow_redirects"])
+
+	# covers: AC-15
+	def test_a_failed_read_refuses_before_new_is_sent(self):
+		with (
+			patch.dict(frappe.conf, CLOUD_KEYS),
+			patch("rarebooks_control.providers.frappe_cloud.requests.post") as post,
+		):
+			post.return_value = self.answer({"name": SERVER, "region_info": None})
+			with self.assertRaises(FrappeCloudError) as raised:
+				frappe_cloud.new_site("rb-0a1b2c3d", DOMAIN, "books-group", SERVER, PLAN, ["frappe"])
+		self.assertNotIsInstance(raised.exception, OutcomeUnknown)
+		self.assertNotIn(
+			"press.api.site.new", [call.args[0].rsplit("/", 1)[1] for call in post.call_args_list]
+		)
