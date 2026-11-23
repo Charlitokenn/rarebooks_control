@@ -417,6 +417,152 @@ class TestFailedSignup(PoolTestCase):
 		self.assertEqual(self.discard_case(POOL).kind, "Discard")
 
 
+class TestDiscardOverTrialCase(PoolTestCase):
+	"""A claimed site that got a Trial case before its sign up failed (found in the staging sign up, 2026-11-23)."""
+
+	def setUp(self):
+		super().setUp()
+		frappe.cache.delete_keys("signup-discard-refused:")
+
+	def claimed(self):
+		self.pool_site()
+		self.ask(onboarding.request_site, ASK)
+		self.run_jobs()
+		return self.signup()
+
+	def trial_case(self, site: str = POOL, status: str = "Scheduled", **values):
+		case = frappe.get_doc(
+			{
+				"doctype": CASE,
+				"site": site,
+				"kind": "Trial",
+				"mode": "live",
+				"status": status,
+				"removal_on": frappe.utils.add_days(frappe.utils.today(), 4),
+				"owner_email": "asha.mrema@gmail.com",
+				"site_url": f"https://{site}",
+				**values,
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+		return case.name
+
+	def fail(self, row):
+		frappe.db.set_value(SIGNUP, row.name, "claimed_on", utc_now() - timedelta(hours=2, minutes=1))
+		frappe.db.commit()
+		onboarding.sweep()
+
+	def case_status(self, name: str) -> str:
+		return frappe.db.get_value(CASE, name, "status")
+
+	def refusals_logged(self) -> int:
+		return frappe.db.count("Error Log", {"method": ("like", "Onboarding: the site % wasn't discarded%")})
+
+	# covers: AC-19
+	def test_a_scheduled_trial_case_is_cancelled_and_a_discard_opens(self):
+		row = self.claimed()
+		trial = self.trial_case()
+		self.fail(row)
+		self.assertEqual(self.signup().status, "Failed")
+		self.assertEqual(self.case_status(trial), "Cancelled")
+		self.assertEqual(frappe.db.get_value(CASE, trial, "last_error"), "Replaced by a discard")
+		self.assertEqual(self.discard_case(POOL).status, "Dropping")
+
+	# covers: AC-19
+	def test_any_trial_case_not_under_way_gives_way_whatever_its_status_and_mode(self):
+		for index, status in enumerate(("Paused", "Exporting", "Holding", "Failed")):
+			site = f"rb-0000000{index}.frappe.cloud"
+			self.existing_site(site, owner_email="asha.mrema@gmail.com", pool_status="Claimed")
+			trial = self.trial_case(site, status, mode="dry_run" if index % 2 else "live")
+			discard = removal.open_discard(site, "test")
+			frappe.db.commit()
+			self.assertEqual((status, self.case_status(trial)), (status, "Cancelled"))
+			self.assertEqual(frappe.db.get_value(CASE, discard, "kind"), "Discard")
+		# An open Discard case is returned as it is, and no second one opens.
+		self.assertEqual(removal.open_discard(site, "again"), discard)
+		self.assertEqual(frappe.db.count(CASE, {"site": site, "kind": "Discard"}), 1)
+
+	# covers: AC-17, AC-18, AC-19
+	def test_a_drop_under_way_opens_no_discard_and_retry_waits_for_its_removed(self):
+		row = self.claimed()
+		trial = self.trial_case(status="Dropping", drop_started_on=utc_now())
+		self.fail(row)
+		onboarding.sweep()
+		self.assertEqual(self.case_status(trial), "Dropping")
+		self.assertIsNone(self.discard_case(POOL))
+		self.assertIn(trial, self.refused(onboarding.retry_signup, row.name))
+
+		frappe.db.set_value(CASE, trial, "status", "Removed")
+		frappe.db.set_value(SITE, POOL, "subdomain", None)
+		frappe.db.commit()
+		onboarding.sweep()
+		self.assertIsNone(self.discard_case(POOL), "a Removed case of any kind ends the site")
+		self.pool_site("rb-99999999.frappe.cloud")
+		self.as_billing_manager(onboarding.retry_signup, row.name)
+		self.assertEqual(self.signup().status, "Queued")
+
+	# covers: AC-19
+	def test_a_case_with_its_archive_requested_is_under_way_too(self):
+		self.claimed()
+		trial = self.trial_case(status="Holding", archive_requested_on=utc_now())
+		self.assertIsNone(removal.open_discard(POOL, "test"))
+		self.assertEqual(self.case_status(trial), "Holding")
+
+	# covers: AC-17
+	def test_a_refused_discard_is_opened_by_the_sweep_and_logged_once_a_day(self):
+		row = self.claimed()
+		frappe.db.set_value(SITE, POOL, "owner_email", "")
+		frappe.db.commit()
+		before = self.refusals_logged()
+		with patch.dict(frappe.conf, {"books_ops_email": None}):
+			self.fail(row)
+			onboarding.sweep()
+			onboarding.sweep()
+		self.assertEqual(self.signup().status, "Failed")
+		self.assertIsNone(self.discard_case(POOL))
+		self.assertEqual(self.refusals_logged() - before, 1)
+
+		onboarding.sweep()
+		self.assertEqual(self.discard_case(POOL).status, "Dropping")
+
+	# covers: AC-17
+	def test_a_cancelled_discard_is_replaced_under_the_current_mode_and_a_failed_one_never(self):
+		row = self.claimed()
+		self.fail(row)
+		first = self.discard_case(POOL).name
+		frappe.db.set_value(CASE, first, "status", "Cancelled")
+		frappe.db.set_single_value(onboarding.SETTINGS, "discard_mode", "dry_run")
+		frappe.db.commit()
+		onboarding.sweep()
+		second = frappe.db.get_value(CASE, {"site": POOL, "kind": "Discard", "status": "Dropping"}, "name")
+		self.assertNotEqual(second, first)
+		self.assertEqual(frappe.db.get_value(CASE, second, "mode"), "dry_run")
+
+		frappe.db.set_value(CASE, second, "status", "Failed")
+		frappe.db.commit()
+		onboarding.sweep()
+		self.assertEqual(frappe.db.count(CASE, {"site": POOL, "kind": "Discard"}), 2)
+		self.assertIn(f"Discard case {second} is Failed", self.refused(onboarding.retry_signup, row.name))
+
+	# covers: AC-20
+	def test_no_trial_case_for_a_claimed_site_until_its_sign_up_is_ready(self):
+		from rarebooks_control.tests.test_removal import status
+
+		frappe.db.set_single_value(removal.SETTINGS, "mode", "live")
+		frappe.db.commit()
+		self.claimed()
+		self.sites.reports[POOL] = status(POOL, removal_in=4)
+		removal.run_site(POOL)
+		self.assertEqual(frappe.db.count(CASE, {"site": POOL}), 0)
+
+		self.walk_domain()
+		self.assertEqual(self.signup().status, "Ready")
+		removal.run_site(POOL)
+		self.assertEqual(
+			frappe.db.get_value(CASE, {"site": POOL}, ["kind", "status"]), ("Trial", "Scheduled")
+		)
+
+
 class TestQueueAlerts(PoolTestCase):
 	# covers: AC-10
 	def test_the_cap_emails_once_a_day_and_an_old_request_once_naming_the_cause(self):

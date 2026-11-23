@@ -8,7 +8,8 @@ A sign up becomes a Books Signup in status Queued. The claim job takes the oldes
 lock with SKIP LOCKED, names its owner through the Books site's `claim_site` (the Owner step), and leaves the
 rest to spec 0012's five domain steps. The Primary step's transaction sets the request Ready (`mark_ready`),
 and a signed notice tells the Worker, which emails the visitor. A request that fails (AC-17) alerts you once and
-its claimed site is discarded; only you can send it round again (`retry_signup`, AC-18). No network call is made with a row locked
+its claimed site is discarded (the sweep opens the Discard case again when it was refused or later Cancelled);
+only you can send it round again (`retry_signup`, AC-18). No network call is made with a row locked
 (spec 0007 lock hardening): each step reads, commits, calls, then locks again and checks nothing changed.
 """
 
@@ -46,6 +47,9 @@ from rarebooks_control.site_calls import SiteCallFailed, call_site
 SIGNUP = "Books Signup"
 SETTINGS = "Books Onboarding Settings"
 SITE = "Books Hosted Site"
+CASE = "Books Removal Case"
+# A refused discard of a Failed request is logged at most once a day (AC-17).
+DAY_SECONDS = 24 * 60 * 60
 # Calls a minute per endpoint, counted with spec 0008's cache counter (AC-8).
 LIMITS = {"check_subdomain": 120, "request_site": 30, "signup_status": 600, "owner_link": 60}
 CLAIM_JOB = "rarebooks_control.onboarding.claim"
@@ -305,6 +309,10 @@ def sweep():
 		SIGNUP, filters={"status": "Preparing", "claimed_on": ("<=", since)}, pluck="name"
 	):
 		_isolated(fail_if_slow, name, "the 2 hour check")
+	for name in frappe.get_all(
+		SIGNUP, filters={"status": "Failed", "hosted_site": ("is", "set")}, pluck="name"
+	):
+		_isolated(discard_missing, name, "the missing discard")
 	_isolated(lambda _name: alert_queue(), "the queue", "the queue alert")
 
 
@@ -314,6 +322,27 @@ def fail_if_slow(signup: str):
 	if row.status != "Preparing" or not row.claimed_on or utc_now() - row.claimed_on < READY_WAIT:
 		return
 	fail_signup(row, [_("The site wasn't Ready 2 hours after its claim at {0} UTC.").format(row.claimed_on)])
+
+
+def discard_missing(signup: str):
+	"""A Failed request whose site has no open case and no Removed case gets its Discard case now, under the
+	current `discard_mode`: the first one was refused, or it was Cancelled later. An open case (a Failed one too)
+	is left alone, so a Failed Discard waits for its own Retry. A refusal is logged at most once a day (AC-17)."""
+	row = frappe.get_doc(SIGNUP, signup, for_update=True)
+	site = row.hosted_site
+	if row.status != "Failed" or not site or removal.open_case(site) or _site_removed(site):
+		return
+	_name, refusal = removal.try_discard(site, _("Its sign up {0} failed.").format(row.name))
+	if not refusal:
+		return
+	key = f"signup-discard-refused:{row.name}:{utc_now().date().isoformat()}"
+	if not frappe.cache.get_value(key):
+		frappe.cache.set_value(key, 1, expires_in_sec=DAY_SECONDS)
+		frappe.log_error(f"Onboarding: the site {site} of {row.name} wasn't discarded: {refusal}")
+
+
+def _site_removed(site: str) -> bool:
+	return bool(frappe.db.exists(CASE, {"site": site, "status": "Removed"}))
 
 
 def alert_queue():
@@ -651,9 +680,18 @@ def retry_signup(signup: str) -> dict:
 
 
 def _cleanup_pending(site: str) -> str | None:
-	"""Why the old site still holds the request back: its Discard case isn't Removed, or its domain isn't cleaned
-	up, so its label isn't released yet."""
-	if not frappe.db.exists("Books Removal Case", {"site": site, "kind": "Discard", "status": "Removed"}):
+	"""Why the old site still holds the request back: it has an open case, or no Removed case of any kind (a
+	Discard, or the drop that was already under way), or its domain isn't cleaned up, so its label isn't released
+	yet (AC-18)."""
+	open_name = removal.open_case(site)
+	if open_name:
+		case = frappe.db.get_value(CASE, open_name, ["kind", "status"], as_dict=True)
+		if case.kind == removal.DISCARD and case.status == "Failed":
+			return _("Discard case {0} is Failed. Retry that case first.").format(open_name)
+		return _("The old site {0} isn't discarded yet. Retry once its case {1} is Removed.").format(
+			site, open_name
+		)
+	if not _site_removed(site):
 		return _("The old site {0} isn't discarded yet. Retry once its Discard case is Removed.").format(site)
 	if frappe.db.get_value(SITE, site, "subdomain"):
 		return _("The address of the old site {0} isn't cleaned up yet. Retry once it is.").format(site)

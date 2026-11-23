@@ -13,6 +13,8 @@ reports, and never works out a removal date itself.
 A Discard case (spec 0014 AC-19) ends a pool site or a failed sign up's site: it starts `Dropping`, follows
 Books Onboarding Settings `discard_mode` rather than removal `mode`, sends no warning, export or email, and adds
 one guard of its own: the site's owner has never logged in, read twice, the second time right before the archive.
+It replaces an open Trial or Lapsed case unless that case is a drop under way, and a Claimed site gets no Trial or
+Lapsed case until its sign up is Ready (spec 0014 AC-20).
 """
 
 import hashlib
@@ -73,6 +75,7 @@ RUN_SITE = "rarebooks_control.removal.run_site"
 RUN_SITE_TIMEOUT = 15 * 60
 DISCARD = "Discard"
 ONBOARDING_SETTINGS = "Books Onboarding Settings"
+SIGNUP = "Books Signup"
 # Spec 0014 AC-19: a site being discarded may still be building, or be broken, on Frappe Cloud.
 DISCARD_CLOUD_STATUSES = ("Active", "Broken", "Pending", "Installing")
 
@@ -421,6 +424,13 @@ def in_pool(pool_status) -> bool:
 	return pool_status in ("Building", "Ready")
 
 
+def awaits_signup(row) -> bool:
+	"""A Claimed site whose Books Signup isn't Ready yet: the round opens no case for it (spec 0014 AC-20)."""
+	if row.pool_status != "Claimed":
+		return False
+	return not frappe.db.exists(SIGNUP, {"hosted_site": row.name, "status": "Ready"})
+
+
 def cancel_dry_runs():
 	"""Saving `mode` from dry_run to live cancels every open dry run case and deletes its export (AC-9). A dry
 	run never drops, so none of them is `Dropping`."""
@@ -460,6 +470,9 @@ class SiteRun:
 		if keeps_site(report, billing_state(self.row.name)):
 			if case:
 				cancel(case, _("The site is paid or exempt."))
+			self.clear = self.is_marked(report, None)
+		elif not case and awaits_signup(self.row):
+			# Spec 0014 AC-20: no Trial or Lapsed case before the sign up is Ready, so a failed one is discarded.
 			self.clear = self.is_marked(report, None)
 		else:
 			if not case:
@@ -1046,17 +1059,36 @@ def drops_today() -> int:
 
 
 def open_discard(site: str, reason: str) -> str | None:
-	"""Open a Discard case for a pool site or a failed sign up's site. It starts `Dropping`, so the hourly round
-	polls it; the caller commits. A site with another open case gets none, and the error is logged."""
-	other = open_case(site)
-	if other:
-		frappe.log_error(f"Removal: {site} wasn't discarded: case {other} is open", reason)
-		return None
+	"""Open a Discard case for a pool site or a failed sign up's site, and log why when none opens. The caller
+	commits."""
+	name, refusal = try_discard(site, reason)
+	if refusal:
+		frappe.log_error(f"Removal: {site} wasn't discarded: {refusal}", reason)
+	return name
+
+
+def try_discard(site: str, reason: str) -> tuple[str | None, str | None]:
+	"""`(case, None)` once the site has a Discard case, or `(None, why)` when it gets none. It starts `Dropping`,
+	so the hourly round polls it.
+
+	An open Trial or Lapsed case is cancelled first under its row lock, whatever its mode and status, unless it
+	is a drop under way (`Dropping`, or `archive_requested_on` set): that case ends the site itself, so no Discard
+	opens and Retry waits for its Removed. An open Discard case is returned as it is (spec 0014 AC-19)."""
 	row = frappe.db.get_value(SITE, site, ["owner_email", "site_url"], as_dict=True)
+	if not row:
+		return None, "the site isn't in the registry"
 	owner = row.owner_email or frappe.conf.get("books_ops_email")
 	if not owner:
-		frappe.log_error(f"Removal: {site} wasn't discarded: set books_ops_email", reason)
-		return None
+		return None, "set books_ops_email"
+	other = open_case(site)
+	if other:
+		case = frappe.get_doc(CASE, other, for_update=True)
+		if case.status not in FINAL_STATUSES:
+			if case.kind == DISCARD:
+				return case.name, None
+			if case.status == "Dropping" or case.archive_requested_on:
+				return None, f"case {case.name} is a drop under way, so Retry waits for its Removed"
+			cancel(case, _("Replaced by a discard"))
 	now = signing.utc_now()
 	case = frappe.get_doc(
 		{
@@ -1074,7 +1106,7 @@ def open_discard(site: str, reason: str) -> str | None:
 			"last_error": reason[:ERROR_CHARACTERS],
 		}
 	).insert(ignore_permissions=True)
-	return case.name
+	return case.name, None
 
 
 def discard_mode() -> str:
