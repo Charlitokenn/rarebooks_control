@@ -425,10 +425,11 @@ def in_pool(pool_status) -> bool:
 
 
 def awaits_signup(row) -> bool:
-	"""A Claimed site whose Books Signup isn't Ready yet: the round opens no case for it (spec 0014 AC-20)."""
+	"""A Claimed site whose Books Signup isn't Ready yet: the round opens no case for it (spec 0014 AC-20). A
+	request Released from Ready still made the site, so its Trial and Lapsed cases go on (spec 0016 AC-6)."""
 	if row.pool_status != "Claimed":
 		return False
-	return not frappe.db.exists(SIGNUP, {"hosted_site": row.name, "status": "Ready"})
+	return not frappe.db.exists(SIGNUP, {"hosted_site": row.name, "status": ("in", ("Ready", "Released"))})
 
 
 def cancel_dry_runs():

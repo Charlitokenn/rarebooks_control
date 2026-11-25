@@ -26,6 +26,15 @@
   "ready_on",
   "alerted_on",
   "queue_alerted_on",
+  "section_break_release",
+  "released_from",
+  "released_by",
+  "released_on",
+  "column_break_release",
+  "release_reason",
+  "released_email_key",
+  "released_clerk_user_id",
+  "released_subdomain",
   "section_break_notice",
   "notify_status",
   "notified_status",
@@ -44,21 +53,21 @@
    "reqd": 1
   },
   {
-   "description": "The email trimmed and lowercased; Gmail dots and + suffixes dropped. One sign up per key, ever.",
+   "description": "The email trimmed and lowercased; Gmail dots and + suffixes dropped. One live sign up per key; blank once Released.",
    "fieldname": "email_key",
    "fieldtype": "Data",
    "label": "Email Key",
    "read_only": 1,
-   "reqd": 1,
-   "unique": 1
+   "unique": 1,
+   "mandatory_depends_on": "eval:doc.status!=='Released'"
   },
   {
    "fieldname": "clerk_user_id",
    "fieldtype": "Data",
    "label": "Clerk User ID",
    "read_only": 1,
-   "reqd": 1,
-   "unique": 1
+   "unique": 1,
+   "mandatory_depends_on": "eval:doc.status!=='Released'"
   },
   {
    "fieldname": "first_name",
@@ -91,8 +100,8 @@
    "in_list_view": 1,
    "label": "Subdomain",
    "read_only": 1,
-   "reqd": 1,
-   "unique": 1
+   "unique": 1,
+   "mandatory_depends_on": "eval:doc.status!=='Released'"
   },
   {
    "fieldname": "time_zone",
@@ -113,7 +122,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Status",
-   "options": "Queued\nClaiming\nPreparing\nReady\nFailed",
+   "options": "Queued\nClaiming\nPreparing\nReady\nFailed\nReleased",
    "read_only": 1,
    "reqd": 1,
    "search_index": 1
@@ -190,6 +199,64 @@
    "read_only": 1
   },
   {
+   "depends_on": "eval:doc.status==='Released'",
+   "fieldname": "section_break_release",
+   "fieldtype": "Section Break",
+   "label": "Release"
+  },
+  {
+   "description": "The status the sign up was released from.",
+   "fieldname": "released_from",
+   "fieldtype": "Select",
+   "label": "Released From",
+   "options": "\nReady\nFailed",
+   "read_only": 1
+  },
+  {
+   "fieldname": "released_by",
+   "fieldtype": "Link",
+   "label": "Released By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "description": "UTC.",
+   "fieldname": "released_on",
+   "fieldtype": "Datetime",
+   "label": "Released On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_release",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "release_reason",
+   "fieldtype": "Small Text",
+   "label": "Release Reason",
+   "read_only": 1
+  },
+  {
+   "description": "The email key the sign up held before its release.",
+   "fieldname": "released_email_key",
+   "fieldtype": "Data",
+   "label": "Released Email Key",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "released_clerk_user_id",
+   "fieldtype": "Data",
+   "label": "Released Clerk User ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "released_subdomain",
+   "fieldtype": "Data",
+   "label": "Released Subdomain",
+   "read_only": 1
+  },
+  {
    "fieldname": "section_break_notice",
    "fieldtype": "Section Break",
    "label": "Notice to the marketing site"
@@ -230,7 +297,7 @@
  "grid_page_length": 50,
  "link_display_mode": "Search",
  "links": [],
- "modified": "2026-11-22 16:05:33.731143",
+ "modified": "2026-11-25 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Rarebooks Control",
  "name": "Books Signup",
@@ -250,10 +317,15 @@
   }
  ],
  "row_format": "Dynamic",
- "search_fields": "email,subdomain,clerk_user_id",
+ "search_fields": "email,subdomain,clerk_user_id,released_email_key",
  "sort_field": "creation",
  "sort_order": "DESC",
- "states": [],
+ "states": [
+  {
+   "color": "Gray",
+   "title": "Released"
+  }
+ ],
  "title_field": "subdomain",
  "track_changes": 1
 }

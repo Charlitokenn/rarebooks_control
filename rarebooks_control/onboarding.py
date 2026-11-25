@@ -68,6 +68,10 @@ VALUE_MAX = 140
 DEFAULT_ZONE = "UTC"
 NOTICE_TIMEOUT_SECONDS = 30
 OPEN = ("Queued", "Claiming", "Preparing")
+RELEASED = "Released"
+# Only these can be released, never one whose claim, owner or domain steps can still run (spec 0016 AC-2).
+RELEASABLE = ("Ready", "Failed")
+REASON_MAX = 280
 CLERK_USER_ID = re.compile(r"^[A-Za-z0-9_]{1,140}$")
 
 
@@ -534,8 +538,9 @@ def fail_signup_of_site(site: str, lines: list[str]):
 
 def fail_signup(row, lines: list[str]):
 	"""Failed with its reason, one ops email, the Failed notice, and a Discard case for the claimed site (AC-17,
-	AC-19). The row is saved, not committed."""
-	if row.status in ("Ready", "Failed"):
+	AC-19). The row is saved, not committed. A Released row is final too (spec 0016 AC-7), so its old site's
+	domain failure never fails it."""
+	if row.status in ("Ready", "Failed", RELEASED):
 		return
 	row.status = "Failed"
 	row.failed_reason = "\n".join(lines)
@@ -679,6 +684,60 @@ def retry_signup(signup: str) -> dict:
 	row.save(ignore_permissions=True)
 	queue_claim(row.name)
 	return {"status": row.status}
+
+
+# Release (spec 0016)
+
+
+@frappe.whitelist(methods=["POST"])
+def release_signup(signup: str, reason: str) -> dict:
+	"""Free a Ready or Failed request's email, Clerk account and subdomain so the person can sign up again
+	(spec 0016 AC-2 to AC-4). The row stays, Released, with who, when and why; its old site is not touched."""
+	frappe.only_for(BILLING_MANAGER)
+	if not isinstance(signup, str) or not frappe.db.exists(SIGNUP, signup):
+		frappe.throw(_("No sign up {0}.").format(signup), frappe.DoesNotExistError)
+	reason = reason.strip() if isinstance(reason, str) else ""
+	if not 0 < len(reason) <= REASON_MAX:
+		frappe.throw(_("A reason is 1 to 280 characters."))
+	row = frappe.get_doc(SIGNUP, signup, for_update=True)
+	# A double click or a retried call changes nothing (AC-4).
+	if row.status == RELEASED:
+		return {"status": RELEASED}
+	refusal = _release_refusal(row)
+	if refusal:
+		frappe.throw(refusal)
+	row.update(
+		{
+			"released_email_key": row.email_key,
+			"released_clerk_user_id": row.clerk_user_id,
+			"released_subdomain": row.subdomain,
+			"email_key": None,
+			"clerk_user_id": None,
+			"subdomain": None,
+			"released_from": row.status,
+			"status": RELEASED,
+			"released_by": frappe.session.user,
+			"released_on": utc_now(),
+			"release_reason": reason,
+			"notify_status": None,
+			"notified_status": None,
+			"notify_started_on": None,
+			"notify_alerted_on": None,
+		}
+	)
+	# A plain save, so the Billing Manager's write right applies and the change lands in the version history.
+	row.save()
+	return {"status": row.status}
+
+
+def _release_refusal(row) -> str | None:
+	"""Why this request can't be released, checked under its row lock (AC-2, AC-3)."""
+	if row.status not in RELEASABLE:
+		return _("Sign up {0} is still being set up. Release it once it is Ready or Failed.").format(row.name)
+	# A Failed request waits for its old site's Discard, as Retry does (spec 0014 AC-18).
+	if row.status == "Failed" and row.hosted_site:
+		return _cleanup_pending(row.hosted_site)
+	return None
 
 
 def _cleanup_pending(site: str) -> str | None:

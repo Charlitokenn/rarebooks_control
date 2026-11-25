@@ -396,6 +396,32 @@ class TestFailedSignup(PoolTestCase):
 		self.assertIsNone(row.failed_reason)
 		self.assertEqual(frappe.db.get_value(SITE, row.hosted_site, "subdomain"), "acme")
 
+	# covers: spec 0016 AC-2, AC-3
+	def test_a_failed_sign_up_is_released_only_once_its_old_site_is_discarded(self):
+		row = self.claimed()
+		frappe.db.set_value(SIGNUP, row.name, "claimed_on", utc_now() - timedelta(hours=2, minutes=1))
+		frappe.db.commit()
+		onboarding.sweep()
+		self.assertEqual(self.signup().status, "Failed")
+		self.assertIn("isn't discarded yet", self.refused(onboarding.release_signup, row.name, "start over"))
+		self.assertEqual(self.signup().status, "Failed")
+
+		self.cloud.finish_archive(POOL)
+		removal.run_site(POOL)
+		removal.run_site(POOL)
+		self.assertIn("isn't cleaned up", self.refused(onboarding.release_signup, row.name, "start over"))
+		registry.sweep_domain_cleanup()
+		frappe.db.commit()
+		self.as_billing_manager(onboarding.release_signup, row.name, "start over")
+		frappe.db.commit()
+		row = frappe.get_doc(SIGNUP, row.name)
+		self.assertEqual(
+			(row.status, row.released_from, row.released_subdomain, row.hosted_site),
+			("Released", "Failed", "acme", POOL),
+		)
+		# The label is free again for anyone, the same person included.
+		self.assertEqual(registry.check_subdomain("acme"), "acme")
+
 	def test_only_a_billing_manager_retries_and_only_a_failed_sign_up(self):
 		row = self.claimed()
 		self.assertIn("Only a Failed", self.refused(onboarding.retry_signup, row.name))
