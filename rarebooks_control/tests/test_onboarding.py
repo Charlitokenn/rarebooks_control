@@ -73,6 +73,9 @@ class OnboardingTestCase(DomainTestCase):
 		self.addCleanup(self._clear_signups)
 		self.jobs: list[tuple[str, dict]] = []
 		self.start(patch("frappe.enqueue", side_effect=lambda method, **kw: self.jobs.append((method, kw))))
+		self.sleeps: list[int] = []
+		self.start(patch("rarebooks_control.registry.sleep", side_effect=self.sleeps.append))
+		frappe.cache.delete_keys("domain-hurry:")
 		self.marketing = MarketingSite()
 		self.start(patch("rarebooks_control.onboarding.post", side_effect=self.marketing))
 		self.sites.answers["claim_site"] = (200, {"status": "claimed"})
@@ -317,6 +320,49 @@ class TestThread(OnboardingTestCase):
 		self.assertEqual((status, body["url"]), (200, "https://acme.rarebooks.cc/update-password?key=k1"))
 		self.assertEqual(self.send_ops.call_count, 0)
 
+	# covers: AC-13 (the domain is walked back to back after the owner step, not one step per 5 minute run)
+	def test_once_the_owner_is_named_the_domain_steps_run_at_once_to_ready(self):
+		self.pool_site()
+		self.sites.hosts["acme.rarebooks.cc"] = POOL
+		self.cloud.dns_seen.add("acme.rarebooks.cc")
+		self.ask(onboarding.request_site, ASK)
+		self.assertNotIn(registry.HURRY_JOB, [method for method, _kw in self.jobs])
+		self.run_jobs()
+
+		row = self.signup()
+		self.assertEqual(row.status, "Ready")
+		self.assertEqual(frappe.db.get_value(SITE, POOL, "domain_status"), "Active")
+		self.assertEqual(self.sleeps, [], "no wait between steps that finish")
+		self.assertFalse(registry._hurried(POOL), "the 5 minute job gets the site back")
+		self.assertEqual([notice["status"] for notice in self.marketing.notices], ["Ready"])
+
+	# covers: AC-13 (a waiting step is tried again every 10 seconds, for a bounded time, then left to the sweep)
+	def test_a_waiting_step_is_retried_for_a_while_then_left_to_the_5_minute_job(self):
+		self.pool_site()
+		self.ask(onboarding.request_site, ASK)
+		self.run_jobs()
+
+		self.assertEqual(self.step(POOL), ("Working", "Frappe Cloud"))
+		self.assertEqual(self.sleeps, [registry.HURRY_WAIT_SECONDS] * (registry.HURRY_TRIES - 1))
+		self.assertFalse(registry._hurried(POOL))
+		self.walk_domain()
+		self.assertEqual(self.signup().status, "Ready")
+
+	# covers: AC-5 (while the job walks a site, the 5 minute job makes no second set of outside calls for it)
+	def test_the_5_minute_job_leaves_a_hurried_site_alone_until_its_key_expires(self):
+		self.pool_site()
+		with patch("rarebooks_control.registry.queue_hurry"):
+			self.ask(onboarding.request_site, ASK)
+			self.run_jobs()
+		self.assertEqual(self.signup().step, "Domain")
+
+		frappe.cache.set_value(registry._hurry_key(POOL), 1, expires_in_sec=60)
+		self.runs()
+		self.assertEqual(self.step(POOL), (None, None))
+		frappe.cache.delete_value(registry._hurry_key(POOL))
+		self.runs()
+		self.assertEqual(self.step(POOL), ("Working", "Frappe Cloud"))
+
 	# covers: AC-11
 	def test_with_no_ready_site_the_request_stays_queued_and_the_sweep_claims_it_later(self):
 		self.ask(onboarding.request_site, ASK)
@@ -383,9 +429,8 @@ class TestThread(OnboardingTestCase):
 	def test_a_failed_domain_fails_the_request_with_one_email(self):
 		self.pool_site()
 		self.ask(onboarding.request_site, ASK)
-		self.run_jobs()
 		self.dns.add("acme.rarebooks.cc", "A", "203.0.113.9")
-		self.runs()
+		self.run_jobs()
 		self.assertEqual(frappe.db.get_value(SITE, POOL, "domain_status"), "Failed")
 		self.assertEqual(self.signup().status, "Failed")
 		self.assertEqual(self.send_ops.call_count, 1)

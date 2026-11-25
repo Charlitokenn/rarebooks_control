@@ -14,6 +14,7 @@ import re
 import secrets
 from dataclasses import dataclass, field
 from datetime import timedelta
+from time import sleep
 from urllib.parse import urlsplit
 
 import frappe
@@ -324,6 +325,13 @@ CLEANUP_WAIT = timedelta(hours=24)
 DIGEST_WAIT = timedelta(minutes=30)
 CERTIFICATE_RETRY_SECONDS = 30 * 60
 WAIT_LOG_SECONDS = 3 * 60 * 60
+# A just-claimed sign up's domain is walked by its own job rather than one step per 5 minute run: a step that
+# finishes is followed at once, a waiting one is tried again every 10 seconds, for at most 10 minutes. Then the
+# 5 minute job carries on as before (spec 0014 AC-13: the visitor waits on these steps).
+HURRY_JOB = "rarebooks_control.registry.hurry_domain"
+HURRY_TRIES = 60
+HURRY_WAIT_SECONDS = 10
+HURRY_KEY_SECONDS = HURRY_TRIES * HURRY_WAIT_SECONDS + 5 * 60
 
 
 @frappe.whitelist(methods=["POST"])
@@ -443,8 +451,61 @@ def run_domain_steps():
 		filters={"status": "Active", "subdomain": ("is", "set")},
 		fields=["name", "domain_status", "domain_step"],
 	):
-		if row.domain_status in (None, "", WORKING) and row.domain_step != CLEANUP:
+		if row.domain_status in (None, "", WORKING) and row.domain_step != CLEANUP and not _hurried(row.name):
 			_isolated(move_domain, row.name, "the domain step")
+
+
+def queue_hurry(site: str):
+	"""Walk one site's domain steps now, back to back (spec 0014 AC-13). Sent after the commit that makes them
+	eligible, so the job sees the Domain step."""
+	frappe.enqueue(
+		HURRY_JOB,
+		queue="long",
+		job_id=f"domain-hurry:{site}",
+		deduplicate=True,
+		enqueue_after_commit=True,
+		site=site,
+	)
+
+
+def hurry_domain(site: str):
+	"""Move the site a step at a time until its domain is Active or Failed, or the tries run out. Each step runs
+	under `move_domain`'s lock rule (AC-5) and commits, so nothing is held across the waits. While it runs, the 5
+	minute job leaves the site alone, so the outside calls of one step are never made twice at once; a crashed job
+	hands it back when the key expires."""
+	key = _hurry_key(site)
+	frappe.cache.set_value(key, 1, expires_in_sec=HURRY_KEY_SECONDS)
+	try:
+		for _try in range(HURRY_TRIES):
+			before = _domain_state(site)
+			if before is None:
+				return
+			_isolated(move_domain, site, "the domain step")
+			after = _domain_state(site)
+			if after is None:
+				return
+			if after == before:
+				sleep(HURRY_WAIT_SECONDS)
+	finally:
+		frappe.cache.delete_value(key)
+
+
+def _domain_state(site: str) -> tuple | None:
+	"""The site's domain status and step, or None once nothing is left for the steps to do."""
+	row = frappe.db.get_value(
+		SITE, site, ["status", "subdomain", "domain_status", "domain_step"], as_dict=True
+	)
+	if not row or not _domain_movable(row) or row.status != "Active":
+		return None
+	return (row.domain_status or None, row.domain_step or None)
+
+
+def _hurried(site: str) -> bool:
+	return bool(frappe.cache.get_value(_hurry_key(site)))
+
+
+def _hurry_key(site: str) -> str:
+	return f"domain-hurry:{site}"
 
 
 def move_domain(site: str):

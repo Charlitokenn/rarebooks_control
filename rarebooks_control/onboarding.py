@@ -494,6 +494,8 @@ def run_owner_step(signup: str):
 	if reason is None:
 		row.step = "Domain"
 		row.save(ignore_permissions=True)
+		# The visitor waits on the domain steps: walk them now, not one per 5 minute run (AC-13).
+		registry.queue_hurry(row.hosted_site)
 	else:
 		row.attempts = (row.attempts or 0) + 1
 		if row.attempts >= OWNER_TRIES:
