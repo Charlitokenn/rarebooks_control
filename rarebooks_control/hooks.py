@@ -10,6 +10,18 @@ require_type_annotated_api_methods = True
 # Frappe writes the typing block into each DocType controller on save (developer mode).
 export_python_type_annotations = True
 
+# The app's own tile on the apps screen, opening Billing. Its rail is the Dock the app ships
+# (`dock/rarebooks_control`): without both, the desk lands on Frappe's Build after sign in.
+add_to_apps_screen = [
+	{
+		"name": app_name,
+		"title": app_title,
+		"route": "/desk/billing",
+		"has_permission": "rarebooks_control.permissions.has_app_permission",
+		"sequence_id": 10,
+	}
+]
+
 # Spec 0008 AC-20: two factor sign in for every desk user. Spec 0010 AC-14: `dormant_days` 0.
 after_install = "rarebooks_control.install.after_install"
 
