@@ -1,4 +1,5 @@
-"""PayPal: token, subscriptions and webhook verification (spec 0008 AC-4, AC-9, AC-11). A thin module over
+"""PayPal: token, subscriptions, webhook verification and the go live check's reads (spec 0008 AC-4, AC-9,
+AC-11). A thin module over
 `requests`, so tests patch these functions and nothing else talks to PayPal.
 
 Credentials come from this site's config: `paypal_mode` (`sandbox` or `live`), `paypal_client_id`,
@@ -95,6 +96,22 @@ def cancel_subscription(subscription_id: str, reason: str):
 	)
 
 
+def get_plan(plan_id: str) -> dict | None:
+	"""The billing plan as PayPal holds it, or None when PayPal doesn't know the id (the go live check)."""
+	answer = _call("GET", f"/v1/billing/plans/{_path_id(plan_id, 'plan')}", not_found_ok=True)
+	if answer is not None and (not isinstance(answer, dict) or answer.get("id") != plan_id):
+		raise PayPalError("plan answer is not the plan asked for")
+	return answer
+
+
+def get_webhook(webhook_id: str) -> dict | None:
+	"""The webhook as PayPal holds it, or None when PayPal doesn't know the id (the go live check)."""
+	answer = _call("GET", f"/v1/notifications/webhooks/{_path_id(webhook_id, 'webhook')}", not_found_ok=True)
+	if answer is not None and (not isinstance(answer, dict) or answer.get("id") != webhook_id):
+		raise PayPalError("webhook answer is not the webhook asked for")
+	return answer
+
+
 def is_verified_webhook(headers, raw: bytes) -> bool:
 	"""Ask PayPal whether this delivery is genuine (AC-9). Raises `PayPalError` when PayPal can't answer.
 
@@ -117,12 +134,12 @@ def is_verified_webhook(headers, raw: bytes) -> bool:
 
 def token() -> str:
 	"""The OAuth access token, cached until 60 seconds before it expires."""
-	cached = frappe.cache.get_value(TOKEN_CACHE_KEY)
-	if cached:
-		return cached
 	client_id, secret = frappe.conf.get("paypal_client_id"), frappe.conf.get("paypal_client_secret")
 	if not client_id or not secret:
 		raise PayPalError("paypal_client_id or paypal_client_secret is not set")
+	cached = frappe.cache.get_value(token_cache_key())
+	if cached:
+		return cached
 	try:
 		response = requests.post(
 			f"{base_url()}/v1/oauth2/token",
@@ -138,8 +155,14 @@ def token() -> str:
 	if not isinstance(value, str) or not value:
 		raise PayPalError("token answer has no access_token")
 	if expires_in > TOKEN_MARGIN_SECONDS:
-		frappe.cache.set_value(TOKEN_CACHE_KEY, value, expires_in_sec=expires_in - TOKEN_MARGIN_SECONDS)
+		frappe.cache.set_value(token_cache_key(), value, expires_in_sec=expires_in - TOKEN_MARGIN_SECONDS)
 	return value
+
+
+def token_cache_key() -> str:
+	"""One cached token per mode and app, so switching `paypal_mode` or the app's credentials to live never
+	sends a sandbox token to PayPal live. The client id is public; the secret is never part of a key."""
+	return f"{TOKEN_CACHE_KEY}:{base_url()}:{frappe.conf.get('paypal_client_id')}"
 
 
 def _call(
@@ -168,7 +191,7 @@ def _call(
 		raise PayPalError(f"{method} {name} failed: {type(error).__name__}") from None
 	if response.status_code == 401:
 		# A token PayPal no longer accepts: drop it so the next call gets a fresh one.
-		frappe.cache.delete_value(TOKEN_CACHE_KEY)
+		frappe.cache.delete_value(token_cache_key())
 	if response.status_code == 404 and not_found_ok:
 		return None
 	if response.status_code not in expect:
@@ -181,8 +204,8 @@ def _call(
 		raise PayPalError(f"{method} {name} answered with invalid JSON") from None
 
 
-def _path_id(subscription_id: str) -> str:
-	"""A subscription id as PayPal makes them (`I-` plus letters and digits), so it can't change the path."""
-	if not isinstance(subscription_id, str) or not subscription_id.replace("-", "").isalnum():
-		raise PayPalError("not a PayPal subscription id")
-	return subscription_id
+def _path_id(value: str, kind: str = "subscription") -> str:
+	"""An id as PayPal makes them (`I-` or `P-` plus letters and digits), so it can't change the path."""
+	if not isinstance(value, str) or not value.replace("-", "").isalnum():
+		raise PayPalError(f"not a PayPal {kind} id")
+	return value

@@ -25,6 +25,9 @@ bench --site <site> migrate
 uvx ruff@0.14.10 check rarebooks_control
 uvx ruff@0.14.10 format --check rarebooks_control
 
+# PayPal go live check, read only (before and after paypal_mode changes; spec 0008 task 20)
+bench --site <site> execute rarebooks_control.paypal_check.run
+
 # Test (the site needs allow_tests set to 1)
 bench --site <site> run-tests --app rarebooks_control
 ```
