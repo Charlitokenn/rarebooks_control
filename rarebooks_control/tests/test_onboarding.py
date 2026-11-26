@@ -206,7 +206,8 @@ class TestRequestSite(OnboardingTestCase):
 		row = self.signup()
 		self.assertEqual(body["request_id"], row.name)
 		self.assertEqual((body["status"], body["step"]), ("Queued", None))
-		self.assertNotIn("address", body)
+		# spec 0023 AC-8: the address is returned while the site is built
+		self.assertEqual(body["address"], "https://acme.rarebooks.cc")
 		self.assertEqual(
 			(row.email, row.email_key, row.company_name, row.subdomain, row.time_zone, row.status),
 			(
@@ -291,7 +292,8 @@ class TestThread(OnboardingTestCase):
 		)
 		status, body = self.ask(onboarding.signup_status, {"clerk_user_id": CLERK})
 		self.assertEqual((body["status"], body["step"]), ("Preparing", "Domain"))
-		self.assertNotIn("address", body)
+		# spec 0023 AC-8: the address is returned while the site is built
+		self.assertEqual(body["address"], "https://acme.rarebooks.cc")
 
 		self.walk_domain()
 		row = self.signup()
@@ -426,6 +428,12 @@ class TestThread(OnboardingTestCase):
 		self.assertIn("owner step failed", row.failed_reason)
 		self.assertEqual(self.send_ops.call_count, 1)
 		self.assertEqual([notice["status"] for notice in self.marketing.notices], ["Failed"])
+
+		# spec 0023 AC-7, AC-8: a Failed request keeps the step it stopped at and never carries the address
+		status, body = self.ask(onboarding.signup_status, {"clerk_user_id": CLERK, "request_id": row.name})
+		self.assertEqual((status, body["status"], body["step"]), (200, "Failed", "Owner"))
+		self.assertNotIn("address", body)
+		self.assertNotIn("failed_reason", body)
 
 	# covers: AC-17 (one email, not two, when the domain of a claimed site fails)
 	def test_a_failed_domain_fails_the_request_with_one_email(self):

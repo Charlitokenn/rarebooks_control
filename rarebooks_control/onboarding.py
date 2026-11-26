@@ -275,10 +275,14 @@ def _signup_of(clerk_user_id, request_id, require_request: bool) -> str | None:
 
 
 def _summary(name: str) -> dict:
-	"""`request_id`, `status`, `step`, and the address only once Ready (AC-4)."""
+	"""`request_id`, `status`, `step`, and the address for every status but Failed.
+
+	Spec 0023 AC-8 (amends spec 0014 AC-4): the welcome page shows the address the site will have while it is
+	built, so it is returned from Queued on. A Failed request never carries it (AC-7); its `step` stays, so the
+	page can mark the step it stopped at."""
 	row = frappe.db.get_value(SIGNUP, name, ["name", "status", "step", "subdomain"], as_dict=True)
 	summary = {"request_id": row.name, "status": row.status, "step": row.step or None}
-	if row.status == "Ready":
+	if row.status != "Failed" and row.subdomain:
 		summary["address"] = f"https://{cloudflare.full_domain(row.subdomain)}"
 	return summary
 
