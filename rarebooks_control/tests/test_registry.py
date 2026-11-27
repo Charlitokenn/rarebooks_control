@@ -373,7 +373,12 @@ class UnitTestFrappeCloudClient(UnitTestCase):
 	def test_calls_the_three_methods_with_token_team_and_timeout(self):
 		# covers: 0010 AC-13, 0011 AC-3
 		with patch.dict(frappe.conf, CLOUD_CONF), patch("requests.post") as post:
-			post.return_value = self.response(body={"name": "a.app", "status": "Active", "group": "", "x": 1})
+			post.side_effect = [
+				self.response(body={"name": "a.app", "status": "Active", "group": "", "x": 1}),
+				self.response(body=[]),
+				self.response(body=[]),
+				self.response(body={}),
+			]
 			self.assertEqual(
 				frappe_cloud.get_site("a.app"), {"name": "a.app", "status": "Active", "group": None}
 			)
@@ -384,6 +389,8 @@ class UnitTestFrappeCloudClient(UnitTestCase):
 			urls,
 			[
 				"https://cloud.frappe.io/api/method/press.api.site.get",
+				# update_config reads the Site Config rows first, so it keeps the other keys (spec 0010 AC-11).
+				"https://cloud.frappe.io/api/method/press.api.client.get_list",
 				"https://cloud.frappe.io/api/method/press.api.site.update_config",
 				"https://cloud.frappe.io/api/method/press.api.site.archive",
 			],
@@ -392,9 +399,9 @@ class UnitTestFrappeCloudClient(UnitTestCase):
 			self.assertEqual(c.kwargs["headers"]["Authorization"], "token key-123:secret-456")
 			self.assertEqual(c.kwargs["headers"]["X-Press-Team"], "team@example.com")
 			self.assertEqual(c.kwargs["timeout"], 30)
-		self.assertEqual(post.call_args_list[2].kwargs["json"], {"name": "a.app", "force": False})
+		self.assertEqual(post.call_args_list[3].kwargs["json"], {"name": "a.app", "force": False})
 		self.assertEqual(
-			post.call_args_list[1].kwargs["json"]["config"],
+			post.call_args_list[2].kwargs["json"]["config"],
 			'[{"key": "books_control_url", "value": "https://c", "type": "String"}]',
 		)
 
