@@ -252,6 +252,7 @@ function render_grid(frm) {
 		],
 		onbeforechange: (worksheet, cell, x, y, value) =>
 			saved(Number(y)) ? worksheet.getValueFromCoords(x, y) : value,
+		onbeforepaste: (worksheet, block, x) => trim_paste(block, Number(x), kind.columns.length + FIRST_CELL_COLUMN),
 		onbeforedeleterow: (worksheet, removed) => {
 			if (removed.some((y) => saved(Number(y)))) {
 				frappe.show_alert({ message: __("A row that saved on the site can't be deleted."), indicator: "orange" });
@@ -268,6 +269,22 @@ function render_grid(frm) {
 	frm.bulk.grid = grid;
 	frm.bulk.kind = kind;
 	paint_warnings(frm, notes);
+}
+
+function trim_paste(block, x, width) {
+	// A block from Google Sheets or Excel can be pasted at any cell (AC-4). Jspreadsheet adds columns for a
+	// block wider than the grid, and those cells would be lost on save, so the block is cut to fit and you
+	// hear about it. Rows past the end are added as usual.
+	const room = width - x;
+	if (room <= 0 || block.every((line) => line.length <= room)) {
+		// Nothing returned keeps Jspreadsheet's own block (a returned block replaces it).
+		return undefined;
+	}
+	frappe.show_alert({
+		message: __("The pasted block is wider than the grid. Columns past the last one were left out."),
+		indicator: "orange",
+	});
+	return block.map((line) => line.slice(0, room).map((cell) => cell.value));
 }
 
 function result_text(result) {
@@ -346,7 +363,8 @@ function download_template(frm) {
 		return;
 	}
 	const header = kind.columns.map((column) => csv_cell(column.label)).join(",");
-	const blob = new Blob([header + "\r\n"], { type: "text/csv;charset=utf-8" });
+	// The byte order mark makes Excel read the headers as UTF-8.
+	const blob = new Blob(["﻿" + header + "\r\n"], { type: "text/csv;charset=utf-8" });
 	const link = document.createElement("a");
 	link.href = URL.createObjectURL(blob);
 	link.download = `${frm.doc.import_type || "import"} template.csv`;
@@ -365,9 +383,25 @@ function load_csv(frm) {
 		if (!file) {
 			return;
 		}
-		file.text().then((text) => add_csv_rows(frm, frappe.utils.csv_to_array(text)));
+		file.text().then((text) => add_csv_rows(frm, read_csv(text)));
 	});
 	input.trigger("click");
+}
+
+function read_csv(text) {
+	// Excel writes a byte order mark, and on a comma decimal locale it separates with ";".
+	const clean = text.replace(/^﻿/, "");
+	const first = clean.split(/\r?\n/, 1)[0];
+	const delimiter = (first.match(/;/g) || []).length > (first.match(/,/g) || []).length ? ";" : ",";
+	return frappe.utils.csv_to_array(clean, delimiter);
+}
+
+function header_key(kind, text) {
+	// A header matches a column label, with or without the grid's " *" required mark, or a column key.
+	const label = String(text || "").trim().replace(/\s*\*$/, "");
+	const column =
+		kind.columns.find((item) => item.label === label) || kind.columns.find((item) => item.key === label);
+	return column ? column.key : null;
 }
 
 function add_csv_rows(frm, matrix) {
@@ -375,10 +409,11 @@ function add_csv_rows(frm, matrix) {
 	if (!kind || !matrix.length) {
 		return;
 	}
+	// Keep any cell typed since the last change event before the grid is drawn again.
+	sync_rows(frm);
 	const [header, ...lines] = matrix;
-	const byLabel = new Map(kind.columns.map((column) => [column.label, column.key]));
-	const keys = header.map((label) => byLabel.get(String(label).trim()));
-	const unknown = header.filter((label, index) => label && !keys[index]);
+	const keys = header.map((text) => header_key(kind, text));
+	const unknown = header.filter((label, index) => String(label || "").trim() && !keys[index]);
 	const rows = parse(frm.doc.rows, []);
 	for (const line of lines) {
 		const cells = {};

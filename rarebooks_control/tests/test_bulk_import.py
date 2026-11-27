@@ -380,6 +380,26 @@ class IntegrationTestBulkImportFlow(BulkImportTestCase):
 			[column["key"] for column in json.loads(doc.columns)["columns"]], ["name", "item_usage"]
 		)
 
+	def test_reload_columns_is_refused_while_importing(self):
+		# covers: AC-3, AC-10
+		doc = self.checked_and_sent(rows("Pen"))
+		calls = len(self.stub.bodies("import_columns"))
+		with self.assertRaises(frappe.ValidationError):
+			bulk_import.reload_columns(doc.name)
+		self.assertEqual(len(self.stub.bodies("import_columns")), calls)
+		self.assertEqual(self.reload(doc).status, "Importing")
+
+	def test_a_refresh_the_site_refuses_keeps_importing_with_the_reason(self):
+		# covers: AC-11
+		doc = self.checked_and_sent(rows("Pen"))
+		for status, words in ((502, "HTTP 502"), (401, "signature")):
+			with self.subTest(status):
+				self.stub.answers["import_report"] = (status, {"status": "error"})
+				result = bulk_import.refresh(doc.name)
+				self.assertEqual(result["status"], "Importing")
+				self.assertIn(words, result["last_error"])
+				self.assertNotIn("Pen", result["last_error"])
+
 	def test_expenses_are_never_submitted(self):
 		# covers: AC-7
 		doc = self.new_import(rows("Rent"), import_type="Books Expense", submit_after_import=1)
@@ -397,6 +417,19 @@ class IntegrationTestBulkImportRefusals(BulkImportTestCase):
 		self.stub.answers["start_import"] = (409, {"status": "site_locked"})
 		self.assertEqual(bulk_import.send(doc.name)["status"], "Refused")
 		self.assertEqual(json.loads(self.reload(doc).rows)[0]["id"], "id-Pen")
+
+	def test_a_refused_import_checks_again_once_the_lock_lifts(self):
+		# covers: AC-11
+		doc = self.new_import(rows("Pen"))
+		self.stub.answers["preview_import"] = (409, {"status": "site_locked"})
+		self.assertEqual(bulk_import.check(doc.name)["status"], "Refused")
+		self.assertIn("locked", self.reload(doc).last_error)
+		self.assertEqual(json.loads(self.reload(doc).rows)[0]["id"], "id-Pen")
+		del self.stub.answers["preview_import"]
+		self.assertEqual(bulk_import.check(doc.name)["status"], "Checked")
+		self.assertFalse(self.reload(doc).last_error)
+		bulk_import.send(doc.name)
+		self.assertEqual(self.reload(doc).status, "Importing")
 
 	def test_an_unreachable_site_leaves_the_status(self):
 		# covers: AC-11
@@ -471,6 +504,23 @@ class IntegrationTestBulkImportRetention(BulkImportTestCase):
 				method(doc.name)
 		self.assertFalse(self.reload(running).rows_cleared_on)
 		self.assertFalse(frappe.db.exists("Version", {"ref_doctype": DOCTYPE, "docname": doc.name}))
+
+	def test_an_import_in_use_again_is_not_cleared_and_a_cleared_one_takes_no_edit(self):
+		# covers: AC-14
+		doc = self.new_import(rows("Pen"))
+		frappe.set_user("Administrator")
+		# Listed by the daily job a moment ago, then edited before its lock was taken.
+		bulk_import._clear(doc.name, cutoff=utc_now() - timedelta(days=30))
+		self.assertFalse(self.reload(doc).rows_cleared_on)
+		bulk_import._clear(doc.name)
+		frappe.set_user(BILLING_MANAGER)
+		with self.assertRaises(frappe.ValidationError):
+			bulk_import.reload_columns(doc.name)
+		doc = self.reload(doc)
+		doc.rows = json.dumps(rows("Ink"))
+		with self.assertRaises(frappe.ValidationError):
+			doc.save()
+		self.assertIsNone(self.reload(doc).rows)
 
 	def test_a_removed_site_clears_all_its_imports(self):
 		# covers: AC-14

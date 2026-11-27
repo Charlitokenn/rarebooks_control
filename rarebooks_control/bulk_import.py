@@ -102,6 +102,12 @@ def reload_columns(name: str) -> dict:
 	"""Fetch the columns again, keep cells by column key, and name any column that is gone (AC-3)."""
 	frappe.only_for(BILLING_MANAGER)
 	doc = _editable(name)
+	if doc.status == "Importing":
+		# AC-10: no edits while Importing, and new columns are an edit of every row.
+		frappe.throw(_("This import is running. Wait for it to finish."))
+	refusal = eligibility_refusal(doc.hosted_site)
+	if refusal:
+		frappe.throw(refusal)
 	answer = site_columns(doc.hosted_site, fresh=True)
 	kind = _type_from(answer, doc.import_type)
 	if not kind:
@@ -119,7 +125,7 @@ def reload_columns(name: str) -> dict:
 		row.columns = json.dumps(columns)
 		row.columns_fetched_on = signing.utc_now()
 		row.rows = json.dumps(rows)
-		row.status = "Draft"
+		row.status, row.checked_hash, row.last_error = "Draft", None, None
 
 	doc = _write(name, apply)
 	return {"columns": columns, "gone": gone, "rows": rows, "status": doc.status}
@@ -361,8 +367,12 @@ def _refresh(name: str):
 		return
 	try:
 		report, logs = _read_report(doc.hosted_site, doc.site_import)
-	except SiteCallFailed:
-		_write(name, lambda row: _stalled(row) or _error(row, _("The site couldn't be reached. Try again.")))
+	except SiteCallFailed as failed:
+		# AC-11: the status stays Importing with the reason, until the 2 hour stall rule gives up on it.
+		reason = (
+			_site_error(failed.status) if failed.status else _("The site couldn't be reached. Try again.")
+		)
+		_write(name, lambda row: _stalled(row) or _error(row, reason))
 		return
 	except Refusal as refusal:
 		reason = str(refusal)
@@ -480,7 +490,7 @@ def clear_old_rows():
 		pluck="name",
 	)
 	for name in [*finished, *idle]:
-		_clear(name)
+		_clear(name, cutoff=cutoff)
 
 
 def clear_for_site(site: str):
@@ -493,8 +503,15 @@ def clear_for_site(site: str):
 		_clear(name, commit=False)
 
 
-def _clear(name: str, commit: bool = True):
+def _clear(name: str, commit: bool = True, cutoff=None):
+	"""Clear one import's rows. With `cutoff` (the daily job), only if it still qualifies under the row lock."""
+
 	def apply(row):
+		if row.rows_cleared_on:
+			return False
+		if cutoff and (row.status == "Importing" or (row.finished_on or row.modified) >= cutoff):
+			# A send or an edit landed between the job's list and this lock, so the import is in use again.
+			return False
 		row.rows = row.results = row.columns = None
 		row.rows_cleared_on = signing.utc_now()
 		if row.status == "Importing":
@@ -595,11 +612,13 @@ def _editable(name: str):
 
 
 def _write(name: str, apply, commit: bool = True):
-	"""Lock the row, apply the change, save and commit. Never called across a site call."""
+	"""Lock the row, apply the change, save and commit. Never called across a site call.
+
+	An `apply` that returns False changes nothing, so the row is not saved."""
 	row = frappe.get_doc(DOCTYPE, name, for_update=True)
-	apply(row)
-	row.flags.bulk_import_write = True
-	row.save(ignore_permissions=True)
+	if apply(row) is not False:
+		row.flags.bulk_import_write = True
+		row.save(ignore_permissions=True)
 	if commit:
 		frappe.db.commit()
 	return row
