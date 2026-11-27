@@ -61,26 +61,34 @@ def eligibility_refusal(site: str | None) -> str | None:
 	if row.pool_status not in (None, "", "Claimed"):
 		return _("Site {0} is a pool site no one has claimed.").format(site)
 	signup = frappe.db.get_value(SIGNUP, {"hosted_site": site}, "status")
-	if signup and signup != "Ready":
+	# A Released request counts whatever it was released from, as in `removal.awaits_signup` (spec 0016 AC-6).
+	if signup and signup not in ("Ready", "Released"):
 		return _("The sign up for site {0} is not Ready.").format(site)
-	if removal.open_case(site):
-		return _("Site {0} has an open removal case.").format(site)
+	# Never `removal.open_case`: every unpaid site has a Scheduled case from day 1 of its trial.
+	if removal.drop_under_way(site):
+		return _("Site {0} is being removed.").format(site)
 	return None
 
 
 @frappe.whitelist()
 @frappe.validate_and_sanitize_search_inputs
 def site_query(doctype: str, txt: str, searchfield: str, start: int, page_len: int, filters: dict) -> list:
-	"""The eligible sites for the site picker (AC-2)."""
+	"""The eligible sites for the site picker, searched by site, subdomain, company and owner email, each shown
+	with its subdomain, company and owner email (AC-2)."""
 	frappe.only_for(BILLING_MANAGER)
+	like = ("like", f"%{txt}%")
 	candidates = frappe.get_all(
 		SITE,
 		filters={"status": "Active", "config_status": "Active", "owner_email": ("is", "set")},
-		or_filters={"site": ("like", f"%{txt}%"), "owner_email": ("like", f"%{txt}%")},
-		fields=["name", "owner_email"],
+		or_filters={"site": like, "subdomain": like, "company_name": like, "owner_email": like},
+		fields=["name", "subdomain", "company_name", "owner_email"],
 		order_by="name asc",
 	)
-	eligible = [[row.name, row.owner_email] for row in candidates if not eligibility_refusal(row.name)]
+	eligible = [
+		[row.name, row.subdomain or "", row.company_name or "", row.owner_email]
+		for row in candidates
+		if not eligibility_refusal(row.name)
+	]
 	return eligible[int(start) : int(start) + int(page_len)]
 
 

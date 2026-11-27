@@ -8,7 +8,7 @@ import frappe
 import requests
 from frappe.tests import IntegrationTestCase
 
-from rarebooks_control import bulk_import, removal
+from rarebooks_control import bulk_import, onboarding, removal
 from rarebooks_control.signing import SIGNATURE_HEADER, is_valid_signature, utc_now
 from rarebooks_control.tests.control import SiteResponse
 from rarebooks_control.tests.data_model import (
@@ -453,25 +453,110 @@ class IntegrationTestBulkImportRefusals(BulkImportTestCase):
 	def test_ineligible_sites_are_missing_from_the_picker_and_refused(self):
 		# covers: AC-2
 		frappe.set_user("Administrator")
-		pool = make_site(
-			f"pool-{frappe.generate_hash(length=6)}.example.com", owner_email=None, pool_status="Ready"
-		)
-		removed = make_site(f"gone-{frappe.generate_hash(length=6)}.example.com", status="Removed")
+		pool = self.other_site("pool", owner_email=None, pool_status="Ready")
+		removed = self.other_site("gone", status="Removed")
+		blocked = {
+			"live Holding": self.case_site("Holding"),
+			"live Dropping": self.case_site("Dropping"),
+			"live Paused with an export": self.case_site("Paused", export_sha256="ab" * 32),
+		}
+		allowed = {
+			"live Scheduled": self.case_site("Scheduled"),
+			"live Exporting": self.case_site("Exporting"),
+			"live Failed": self.case_site("Failed"),
+			"live Cancelled": self.case_site("Cancelled"),
+			"live Paused with no export": self.case_site("Paused"),
+			"dry run Holding": self.case_site("Holding", mode="dry_run"),
+			"Released from Ready": self.signup_site("Released", released_from="Ready"),
+			"Released from Failed": self.signup_site("Released", released_from="Failed"),
+			"Ready sign up": self.signup_site("Ready"),
+		}
+		not_ready = self.signup_site("Failed")
 		frappe.set_user(BILLING_MANAGER)
 		listed = [row[0] for row in bulk_import.site_query(DOCTYPE, "example.com", "name", 0, 500, {})]
 		self.assertIn(self.site.name, listed)
-		self.assertNotIn(pool.name, listed)
-		self.assertNotIn(removed.name, listed)
+		for name in (pool.name, removed.name, not_ready.name, *(row.name for row in blocked.values())):
+			self.assertNotIn(name, listed)
+		for case, row in allowed.items():
+			self.assertIn(row.name, listed, case)
+			self.assertIsNone(bulk_import.eligibility_refusal(row.name), case)
+		for case, row in blocked.items():
+			self.assertEqual(
+				bulk_import.eligibility_refusal(row.name), f"Site {row.name} is being removed.", case
+			)
 
 		doc = self.new_import(rows("Pen"))
-		bulk_import.check(doc.name)
-		with patch("rarebooks_control.bulk_import.removal.open_case", return_value="RC-1"):
-			self.assertEqual(bulk_import.send(doc.name)["status"], "Refused")
+		self.assertEqual(bulk_import.check(doc.name)["status"], "Checked")
+		frappe.set_user("Administrator")
+		self.make_case(self.site.name, "Holding")
+		frappe.set_user(BILLING_MANAGER)
+		self.assertEqual(bulk_import.send(doc.name)["status"], "Refused")
+		self.assertEqual(self.reload(doc).last_error, f"Site {self.site.name} is being removed.")
 		self.assertFalse(self.stub.bodies("start_import"))
 		with self.assertRaises(frappe.ValidationError):
 			frappe.get_doc(
 				{"doctype": DOCTYPE, "hosted_site": pool.name, "import_type": ITEM, "rows": "[]"}
 			).insert()
+
+	def test_the_picker_searches_subdomain_company_and_owner_email(self):
+		# covers: AC-2
+		frappe.set_user("Administrator")
+		label = f"kibo{frappe.generate_hash(length=6)}"
+		site = self.other_site(
+			"pick",
+			subdomain=label,
+			company_name=f"Kibo Stationers {label}",
+			owner_email=f"{label}@kibo.co.tz",
+		)
+		frappe.set_user(BILLING_MANAGER)
+		for text in (label[2:8], f"Stationers {label}", f"{label}@kibo.co.tz"):
+			found = {row[0]: row for row in bulk_import.site_query(DOCTYPE, text, "name", 0, 50, {})}
+			self.assertIn(site.name, found, text)
+			self.assertEqual(found[site.name][1:3], [label, f"Kibo Stationers {label}"])
+
+	def other_site(self, prefix: str, **values):
+		return make_site(f"{prefix}-{frappe.generate_hash(length=6)}.example.com", **values)
+
+	def make_case(self, site: str, status: str, mode: str = "live", **values):
+		frappe.get_doc(
+			{
+				"doctype": "Books Removal Case",
+				"site": site,
+				"mode": mode,
+				"kind": "Trial",
+				"removal_on": frappe.utils.today(),
+				"status": status,
+				"owner_email": "owner@example.com",
+				"site_url": f"https://{site}",
+				**values,
+			}
+		).insert(ignore_permissions=True)
+
+	def case_site(self, status: str, mode: str = "live", **values):
+		site = self.other_site("case")
+		self.make_case(site.name, status, mode, **values)
+		return site
+
+	def signup_site(self, status: str, **values):
+		site = self.other_site("signup", pool_status="Claimed")
+		email = f"{frappe.generate_hash(length=8)}@example.com"
+		frappe.get_doc(
+			{
+				"doctype": "Books Signup",
+				"email": email,
+				"email_key": onboarding.email_key(email),
+				"clerk_user_id": f"user_{frappe.generate_hash(length=8)}",
+				"first_name": "Test",
+				"company_name": "Test Co",
+				"subdomain": site.name.split(".")[0],
+				"time_zone": "UTC",
+				"status": status,
+				"requested_on": utc_now(),
+				"hosted_site": site.name,
+				**values,
+			}
+		).insert(ignore_permissions=True)
+		return site
 
 	def test_the_status_cannot_be_set_from_desk(self):
 		# covers: AC-1

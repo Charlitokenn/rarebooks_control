@@ -298,6 +298,18 @@ def open_case(site: str) -> str | None:
 	return frappe.db.get_value(CASE, {"site": site, "status": ("not in", FINAL_STATUSES)}, "name")
 
 
+def drop_under_way(site: str) -> bool:
+	"""A live removal that will drop the site: Holding, Dropping, or Paused with an accepted export, which
+	resumes to Holding (spec 0025 AC-2). Scheduled, Exporting, Failed and Cancelled cases and dry runs don't
+	count. A plain read with no row lock: the site's own lock is the last guard against the hourly round."""
+	return bool(
+		frappe.db.exists(CASE, {"site": site, "mode": "live", "status": ("in", ("Holding", "Dropping"))})
+		or frappe.db.exists(
+			CASE, {"site": site, "mode": "live", "status": "Paused", "export_sha256": ("is", "set")}
+		)
+	)
+
+
 def is_being_removed(site: str) -> bool:
 	"""`create_checkout` refuses while the case is `Dropping` or `Removed`, and in the last hour before
 	`hold_until`, so no payment starts while a drop can start (AC-11, spec 0008 AC-5)."""
