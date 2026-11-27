@@ -80,6 +80,8 @@ class BulkSite:
 		self.down: set[str] = set()
 		# A start that runs on the site but whose answer is lost on the way back.
 		self.lose_answer = False
+		# Something that happens on the control site while this call is on its way (a send, a clear), once.
+		self.during: dict[str, object] = {}
 
 	def hold(self, row):
 		self.secrets[row.name] = row.get_password("control_secret")
@@ -98,6 +100,8 @@ class BulkSite:
 		if not is_valid_signature(data, headers.get(SIGNATURE_HEADER), secret) or body.get("site") != site:
 			return SiteResponse(401, echo, secret)
 		self.calls.append((site, name, body))
+		if name in self.during:
+			self.during.pop(name)()
 		if name in self.answers:
 			status, answer = self.answers[name]
 			return SiteResponse(status, {**answer, **echo}, secret)
@@ -407,6 +411,104 @@ class IntegrationTestBulkImportFlow(BulkImportTestCase):
 		bulk_import.check(doc.name)
 		bulk_import.send(doc.name)
 		self.assertEqual(self.stub.bodies("start_import")[0]["submit"], 0)
+
+
+class IntegrationTestBulkImportRaces(BulkImportTestCase):
+	"""Writes that land after a long site call must not undo what happened meanwhile (AC-10, AC-11)."""
+
+	def test_a_stall_keeps_the_rows_the_site_already_saved(self):
+		# covers: AC-10, AC-11
+		doc = self.checked_and_sent(rows("Pen", "Ink"))
+		site_import = f"CTRL-{doc.name}-1"
+		# The site's job saved Pen, then stopped: its report is not finished, but its log is there.
+		self.stub.reports[site_import] = {
+			"status": "In Progress",
+			"total": 2,
+			"processed": 1,
+			"logs": [
+				{"log_index": 0, "row_ids": ["id-Pen"], "success": True, "docname": "Pen", "message": ""}
+			],
+			"more": False,
+		}
+		frappe.db.set_value(
+			DOCTYPE, doc.name, {"site_processed": 1, "last_progress_on": utc_now() - timedelta(hours=3)}
+		)
+		result = bulk_import.refresh(doc.name)
+		self.assertEqual(result["status"], "Failed")
+		self.assertTrue(result["results"]["id-Pen"]["success"])
+		self.assertEqual([row["id"] for row in bulk_import.sendable_rows(self.reload(doc))], ["id-Ink"])
+
+	def test_a_site_unreachable_at_the_stall_keeps_importing(self):
+		# covers: AC-11
+		doc = self.checked_and_sent(rows("Pen"))
+		frappe.db.set_value(DOCTYPE, doc.name, "last_progress_on", utc_now() - timedelta(hours=3))
+		self.stub.down.add("import_report")
+		result = bulk_import.refresh(doc.name)
+		# The site may have saved rows we can't read, so it is not marked Failed and offered for a resend.
+		self.assertEqual(result["status"], "Importing")
+		self.assertTrue(result["last_error"])
+
+	def test_a_check_that_lands_after_a_send_leaves_importing(self):
+		# covers: AC-10
+		doc = self.new_import(rows("Pen"))
+		self.assertEqual(bulk_import.check(doc.name)["status"], "Checked")
+		self.stub.during["preview_import"] = lambda: bulk_import.send(doc.name)
+		bulk_import.check(doc.name)
+		doc = self.reload(doc)
+		self.assertEqual((doc.status, doc.attempt, doc.site_import), ("Importing", 1, f"CTRL-{doc.name}-1"))
+		with self.assertRaises(frappe.ValidationError):
+			bulk_import.send(doc.name)
+		self.assertEqual(len(self.stub.bodies("start_import")), 1)
+
+	def test_a_locked_answer_that_lands_after_a_send_leaves_importing(self):
+		# covers: AC-10, AC-11
+		doc = self.new_import(rows("Pen"))
+		self.assertEqual(bulk_import.check(doc.name)["status"], "Checked")
+		self.stub.answers["preview_import"] = (409, {"status": "site_locked"})
+		self.stub.during["preview_import"] = lambda: bulk_import.send(doc.name)
+		bulk_import.check(doc.name)
+		self.assertEqual(self.reload(doc).status, "Importing")
+
+	def test_a_reload_that_lands_after_a_send_leaves_importing(self):
+		# covers: AC-3, AC-10
+		doc = self.new_import(rows("Pen"))
+		self.assertEqual(bulk_import.check(doc.name)["status"], "Checked")
+		self.stub.during["import_columns"] = lambda: bulk_import.send(doc.name)
+		with self.assertRaises(frappe.ValidationError):
+			bulk_import.reload_columns(doc.name)
+		doc = self.reload(doc)
+		self.assertEqual((doc.status, doc.site_import), ("Importing", f"CTRL-{doc.name}-1"))
+		self.assertTrue(doc.checked_hash)
+
+	def test_a_report_that_lands_after_the_next_attempt_started_writes_nothing(self):
+		# covers: AC-9, AC-10
+		doc = self.checked_and_sent(rows("Pen"))
+		self.stub.finish(f"CTRL-{doc.name}-1", {"id-Pen": "Pen"})
+
+		def next_attempt():
+			frappe.db.set_value(DOCTYPE, doc.name, {"attempt": 2, "site_import": f"CTRL-{doc.name}-2"})
+			frappe.db.commit()
+
+		self.stub.during["import_report"] = next_attempt
+		result = bulk_import.refresh(doc.name)
+		self.assertEqual(result["status"], "Importing")
+		self.assertEqual(result["results"], {})
+
+	def test_a_report_that_lands_after_the_rows_were_cleared_writes_nothing(self):
+		# covers: AC-14
+		doc = self.checked_and_sent(rows("Pen"))
+		self.stub.finish(f"CTRL-{doc.name}-1", {"id-Pen": "Pen"})
+
+		def removed():
+			bulk_import.clear_for_site(self.site.name)
+			frappe.db.commit()
+
+		self.stub.during["import_report"] = removed
+		bulk_import.refresh(doc.name)
+		doc = self.reload(doc)
+		self.assertTrue(doc.rows_cleared_on)
+		self.assertIsNone(doc.results)
+		self.assertEqual(doc.status, "Failed")
 
 
 class IntegrationTestBulkImportRefusals(BulkImportTestCase):

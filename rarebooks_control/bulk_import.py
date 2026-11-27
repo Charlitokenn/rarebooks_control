@@ -130,6 +130,9 @@ def reload_columns(name: str) -> dict:
 	]
 
 	def apply(row):
+		if not _checkable(row):
+			# A send (or a clear) landed while the site answered: new columns would reset it (AC-10).
+			frappe.throw(_("This import is running. Wait for it to finish."))
 		row.columns = json.dumps(columns)
 		row.columns_fetched_on = signing.utc_now()
 		row.rows = json.dumps(rows)
@@ -187,12 +190,14 @@ def check(name: str) -> dict:
 	try:
 		answer = _call(doc.hosted_site, "preview_import", {"import_type": doc.import_type, "rows": rows})
 	except SiteCallFailed:
-		_write(name, lambda row: _error(row, _("The site couldn't be reached. Try again.")))
+		_write(
+			name, lambda row: _checkable(row) and _error(row, _("The site couldn't be reached. Try again."))
+		)
 		frappe.throw(_("The site couldn't be reached. Try again."))
 	if answer.status == CONFLICT and answer.body.get("status") == "site_locked":
 		reason = _("Site {0} is locked, so it imports nothing until it is paid.").format(doc.hosted_site)
-		_write(name, lambda row: _refuse(row, reason))
-		return {"status": "Refused", "warnings": []}
+		doc = _write(name, lambda row: _checkable(row) and _refuse(row, reason))
+		return {"status": doc.status, "warnings": []}
 	if answer.status != 200:
 		_answer_failed(name, doc.hosted_site, "preview_import", answer.status)
 
@@ -200,6 +205,9 @@ def check(name: str) -> dict:
 	blocking = any(warning.get("blocking") for warning in warnings)
 
 	def apply(row):
+		if not _checkable(row):
+			# A send (or a clear) landed while the site checked: this answer must not undo it (AC-10).
+			return False
 		if checked_hash(row) != expected:
 			# The rows changed while the site checked them, so this check proves nothing about them.
 			return
@@ -373,30 +381,42 @@ def _refresh(name: str):
 	doc = frappe.get_doc(DOCTYPE, name)
 	if doc.status != "Importing" or not doc.site_import or doc.rows_cleared_on:
 		return
+	site_import = doc.site_import
+
+	def write(apply):
+		# The report can take many calls; a send, a check or a clear may land meanwhile. Write only onto the same
+		# Importing attempt, under the row lock (AC-9, AC-10, AC-14).
+		_write(name, lambda row: _same_attempt(row, site_import) and apply(row))
+
 	try:
-		report, logs = _read_report(doc.hosted_site, doc.site_import)
+		report, logs = _read_report(doc.hosted_site, site_import)
 	except SiteCallFailed as failed:
-		# AC-11: the status stays Importing with the reason, until the 2 hour stall rule gives up on it.
+		# AC-11: the status stays Importing with the reason. No stall rule here: the site may have saved rows we
+		# can't read now, and Failed would offer them for a resend (AC-10).
 		reason = (
 			_site_error(failed.status) if failed.status else _("The site couldn't be reached. Try again.")
 		)
-		_write(name, lambda row: _stalled(row) or _error(row, reason))
+		write(lambda row: _error(row, reason))
 		return
 	except Refusal as refusal:
 		reason = str(refusal)
-		_write(name, lambda row: _finish(row, [], "Failed", reason))
+		write(lambda row: _finish(row, [], "Failed", reason))
 		return
 
 	status = report.get("status")
 	if status in FINISHED:
 		stopped = status in ("Error", "Timed Out")
 		reason = _("The import stopped on the site ({0}).").format(status) if stopped else None
-		_write(name, lambda row: _finish(row, logs, "Failed" if stopped else None, reason))
+		write(lambda row: _finish(row, logs, "Failed" if stopped else None, reason))
 	elif status == "Pending" and report.get("blocking_warnings"):
 		reason = _("The site found blocking warnings and didn't import. Check the rows again.")
-		_write(name, lambda row: _finish(row, [], "Failed", reason))
+		write(lambda row: _finish(row, logs, "Failed", reason))
 	else:
-		_write(name, lambda row: _progress(row, report.get("processed") or 0))
+		write(lambda row: _progress(row, report.get("processed") or 0, logs))
+
+
+def _same_attempt(row, site_import: str) -> bool:
+	return row.status == "Importing" and row.site_import == site_import and not row.rows_cleared_on
 
 
 def _read_report(site: str, data_import: str) -> tuple[dict, list[dict]]:
@@ -415,7 +435,9 @@ def _read_report(site: str, data_import: str) -> tuple[dict, list[dict]]:
 		after = page[-1]["log_index"]
 
 
-def _progress(row, processed: int):
+def _progress(row, processed: int, logs: list[dict]):
+	# The rows the site saved so far, so the stall rule below keeps them and a retry never sends them (AC-10).
+	_merge(row, logs)
 	if processed > (row.site_processed or 0):
 		row.site_processed = processed
 		row.last_progress_on = signing.utc_now()
@@ -434,6 +456,15 @@ def _stalled(row) -> bool:
 
 def _finish(row, logs: list[dict], forced: str | None, reason: str | None):
 	"""Write each row's result from the logs, count again, and set the final status (AC-9)."""
+	_merge(row, logs)
+	row.status = forced or _status_from_counts(row)
+	row.finished_on = signing.utc_now()
+	row.last_error = reason
+	row.sending_since = None
+
+
+def _merge(row, logs: list[dict]):
+	"""Each row's result from the site's logs, a saved row never overwritten, then the counts again (AC-9)."""
 	results = json.loads(row.results or "{}")
 	for log in logs:
 		for row_id in log.get("row_ids") or []:
@@ -447,10 +478,6 @@ def _finish(row, logs: list[dict], forced: str | None, reason: str | None):
 			}
 	row.results = json.dumps(results)
 	_count(row)
-	row.status = forced or _status_from_counts(row)
-	row.finished_on = signing.utc_now()
-	row.last_error = reason
-	row.sending_since = None
 
 
 def _status_from_counts(row) -> str:
@@ -638,6 +665,12 @@ def _refuse(row, reason: str):
 
 def _error(row, reason: str):
 	row.last_error, row.sending_since = reason, None
+
+
+def _checkable(row) -> bool:
+	"""Whether a check's answer may still be written: the import is not Importing, final or cleared. Read under
+	the row lock after the site call, since a send or a clear can land while the site checks (AC-10, AC-14)."""
+	return row.status != "Importing" and row.status not in FINAL and not row.rows_cleared_on
 
 
 def _call(site: str, method: str, payload: dict):
