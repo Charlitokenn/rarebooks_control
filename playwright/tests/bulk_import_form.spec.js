@@ -3,6 +3,7 @@
 // here, since a test bench has no customer site to call.
 const { execFileSync } = require("node:child_process");
 const crypto = require("node:crypto");
+const fs = require("node:fs");
 const path = require("node:path");
 const { test, expect } = require("@playwright/test");
 
@@ -89,6 +90,118 @@ test("an Importing import polls once every 5 seconds, even after reloads (AC-9)"
 	expect(refreshes).toBeGreaterThanOrEqual(1);
 	expect(refreshes).toBeLessThanOrEqual(3);
 });
+
+test("a pasted block lands at the cell, adds rows past the end and gives each row an id (AC-4)", async ({
+	page,
+}) => {
+	// covers: AC-4
+	await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+	await page.goto(`/app/books-bulk-import/${data.empty}`);
+	await expect(page.locator(".bulk-import-grid")).toBeVisible();
+
+	// Two rows before the end of the 20 row grid, at the first column, as Google Sheets copies it.
+	await paste(page, "Pen\t2\nInk\t3\nPad\t4", cell(page, 18, 0));
+
+	const rows = await gridRows(page);
+	expect(rows.map((row) => row.cells)).toEqual([
+		{ name: "Pen", rate: "2" },
+		{ name: "Ink", rate: "3" },
+		{ name: "Pad", rate: "4" },
+	]);
+	expect(new Set(rows.map((row) => row.id)).size).toBe(3);
+	expect(rows.every((row) => /^[0-9a-f-]{36}$/.test(row.id))).toBe(true);
+	await expect(page.locator(".bulk-import-grid tbody tr")).toHaveCount(21);
+});
+
+test("a block wider than the grid is cut to fit, with an alert (AC-4)", async ({ page }) => {
+	// covers: AC-4
+	await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+	await page.goto(`/app/books-bulk-import/${data.empty}`);
+	await expect(page.locator(".bulk-import-grid")).toBeVisible();
+	const columns = await page.locator(".bulk-import-grid thead td").count();
+
+	// At the last column (Purpose), so two of the three cells have no column to land in.
+	await paste(page, "Sales\textra\tmore", cell(page, 0, 2));
+
+	await expect(page.getByText("The pasted block is wider than the grid.")).toBeVisible();
+	await expect(page.locator(".bulk-import-grid thead td")).toHaveCount(columns);
+	const rows = await gridRows(page);
+	expect(rows.map((row) => row.cells)).toEqual([{ item_usage: "Sales" }]);
+});
+
+test("the template has the site's headers and a byte order mark (AC-4)", async ({ page }) => {
+	// covers: AC-4
+	await page.goto(`/app/books-bulk-import/${data.empty}`);
+	await expect(page.locator(".bulk-import-grid")).toBeVisible();
+
+	const [download] = await Promise.all([page.waitForEvent("download"), rowsMenu(page, "Download Template")]);
+
+	const text = await readDownload(download);
+	expect(text.startsWith("﻿")).toBe(true);
+	expect(text.slice(1).split("\r\n")[0]).toBe("Item Name,Rate,Purpose");
+});
+
+test("Load CSV reads an Excel file with ; and a BOM, and names an unknown header (AC-4)", async ({
+	page,
+}, testInfo) => {
+	// covers: AC-4
+	const file = testInfo.outputPath("excel.csv");
+	fs.writeFileSync(file, "﻿Item Name *;Purpose;Colour\r\nPen;Sales;red\r\nInk;Both;blue\r\n");
+	await page.goto(`/app/books-bulk-import/${data.empty}`);
+	await expect(page.locator(".bulk-import-grid")).toBeVisible();
+
+	const [chooser] = await Promise.all([page.waitForEvent("filechooser"), rowsMenu(page, "Load CSV")]);
+	await chooser.setFiles(file);
+
+	await expect(page.locator(".modal.show")).toContainText(
+		"These columns are not in the template and were ignored: Colour"
+	);
+	const rows = await gridRows(page);
+	expect(rows.map((row) => row.cells)).toEqual([
+		{ name: "Pen", item_usage: "Sales" },
+		{ name: "Ink", item_usage: "Both" },
+	]);
+});
+
+test("a site message that holds markup is shown as plain text (AC-16)", async ({ page }) => {
+	// covers: AC-16
+	await page.goto(`/app/books-bulk-import/${data.failed}`);
+	const result = cell(page, 0, -1);
+
+	await expect(result).toContainText(data.html_message);
+	await expect(page.locator(".bulk-import-grid tbody").locator("img, b")).toHaveCount(0);
+	expect(await page.evaluate(() => window.__bulk_import_xss)).toBeUndefined();
+});
+
+function cell(page, row, column) {
+	// A grid row's cells: the row number, the hidden row id, Result, then the site's columns.
+	return page.locator(".bulk-import-grid tbody tr").nth(row).locator("td").nth(column + 3);
+}
+
+async function paste(page, text, target) {
+	await page.evaluate((value) => navigator.clipboard.writeText(value), text);
+	await target.click();
+	await page.keyboard.press("Control+V");
+}
+
+async function gridRows(page) {
+	// The form writes the grid into the hidden `rows` field on every change; that is what a save sends.
+	await expect.poll(() => page.evaluate(() => JSON.parse(cur_frm.doc.rows || "[]").length)).toBeGreaterThan(0);
+	return page.evaluate(() => JSON.parse(cur_frm.doc.rows));
+}
+
+async function rowsMenu(page, item) {
+	await page.getByRole("button", { name: "Rows" }).click();
+	await page.locator("button[role=menuitem]:visible", { hasText: item }).first().click();
+}
+
+async function readDownload(download) {
+	const chunks = [];
+	for await (const chunk of await download.createReadStream()) {
+		chunks.push(chunk);
+	}
+	return Buffer.concat(chunks).toString("utf8");
+}
 
 function prepare(site) {
 	// Frappe passes NODE_PATH as <bench>/apps/frappe/node_modules; BENCH_PATH overrides it.

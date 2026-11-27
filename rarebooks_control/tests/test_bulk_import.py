@@ -410,6 +410,67 @@ class IntegrationTestBulkImportFlow(BulkImportTestCase):
 
 
 class IntegrationTestBulkImportRefusals(BulkImportTestCase):
+	def test_no_row_value_reaches_last_error_an_alert_or_the_error_log(self):
+		# covers: AC-16
+		secret = f"Customer Secret {frappe.generate_hash(length=6)}"
+		grid = [{"id": "id-secret", "cells": {"name": secret, "item_usage": "Both", "rate": "77131"}}]
+		started = frappe.utils.now_datetime()
+		errors = []
+
+		def note(doc):
+			errors.append(self.reload(doc).last_error or "")
+
+		for method, status in (
+			("preview_import", 400),
+			("preview_import", 401),
+			("preview_import", 413),
+			("preview_import", 503),
+		):
+			with self.subTest(method=method, status=status):
+				doc = self.new_import(grid)
+				self.stub.answers[method] = (status, {"status": "error"})
+				with self.assertRaises(frappe.ValidationError):
+					bulk_import.check(doc.name)
+				del self.stub.answers[method]
+				note(doc)
+		self.stub.down.add("preview_import")
+		doc = self.new_import(grid)
+		with self.assertRaises(frappe.ValidationError):
+			bulk_import.check(doc.name)
+		self.stub.down.discard("preview_import")
+		note(doc)
+
+		for status in (400, 401, 413, 503, 500):
+			with self.subTest(method="start_import", status=status):
+				doc = self.new_import(grid)
+				bulk_import.check(doc.name)
+				self.stub.answers["start_import"] = (status, {"status": "error"})
+				bulk_import.send(doc.name)
+				del self.stub.answers["start_import"]
+				note(doc)
+		doc = self.new_import(grid)
+		bulk_import.check(doc.name)
+		self.stub.lose_answer = True
+		bulk_import.send(doc.name)
+		self.stub.lose_answer = False
+		note(doc)
+
+		for status in (401, 404, 502):
+			with self.subTest(method="import_report", status=status):
+				doc = self.checked_and_sent(grid)
+				self.stub.answers["import_report"] = (status, {"status": "error"})
+				bulk_import.refresh(doc.name)
+				del self.stub.answers["import_report"]
+				note(doc)
+
+		self.assertTrue(all(errors), errors)
+		alerts = json.dumps([call.args for call in self.send_ops.call_args_list], default=str)
+		self.assertTrue(self.send_ops.called)
+		logged = frappe.get_all("Error Log", filters={"creation": (">=", started)}, pluck="error")
+		for text in (*errors, alerts, *logged):
+			self.assertNotIn(secret, text)
+			self.assertNotIn("77131", text)
+
 	def test_a_locked_site_refuses_the_import(self):
 		# covers: AC-11
 		doc = self.new_import(rows("Pen"))

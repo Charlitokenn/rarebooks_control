@@ -20,11 +20,13 @@ from rarebooks_control.tests.test_bulk_import import TYPES
 
 DOCTYPE = "Books Bulk Import"
 ITEM = "Books Item"
+HTML_MESSAGE = '<img src=x onerror="window.__bulk_import_xss=1"><b>No item</b> found'
 
 
 def prepare() -> dict:
 	"""A Billing Manager who can log in, one eligible site, a Draft import with one wrong cell and an Importing
-	import. Refused unless the site allows tests, since it sets a known password."""
+	import, an empty Draft import and a Failed one whose site message holds markup. Refused unless the site
+	allows tests, since it sets a known password."""
 	if not frappe.conf.allow_tests:
 		frappe.throw("ui_setup.prepare runs only on a site with allow_tests set.")
 	frappe.set_user("Administrator")
@@ -63,6 +65,20 @@ def prepare() -> dict:
 			"last_progress_on": now,
 		},
 	)
+	empty = _import(site, [])
+	failed_row = str(uuid.uuid4())
+	failed = _import(site, [{"id": failed_row, "cells": {"name": f"UI Mug {tag}", "item_usage": "Sales"}}])
+	frappe.db.set_value(
+		DOCTYPE,
+		failed,
+		{
+			"status": "Failed",
+			"attempt": 1,
+			"failed_count": 1,
+			# A site message that holds markup, which the grid must show as text (AC-16).
+			"results": json.dumps({failed_row: {"success": False, "message": HTML_MESSAGE, "attempt": 1}}),
+		},
+	)
 	frappe.db.commit()
 	return {
 		"user": BILLING_MANAGER,
@@ -73,6 +89,9 @@ def prepare() -> dict:
 		"draft": draft,
 		"bad_row": bad,
 		"importing": importing,
+		"empty": empty,
+		"failed": failed,
+		"html_message": HTML_MESSAGE,
 	}
 
 
