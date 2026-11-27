@@ -970,6 +970,10 @@ def mark_removed(case):
 	from rarebooks_control.registry import start_domain_cleanup
 
 	start_domain_cleanup(row.name)
+	# Spec 0025 AC-14: a removed site's bulk import rows go at once, in the same transaction.
+	from rarebooks_control.bulk_import import clear_for_site
+
+	clear_for_site(row.name)
 	frappe.db.commit()
 
 

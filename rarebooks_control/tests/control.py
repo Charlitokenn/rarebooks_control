@@ -63,6 +63,7 @@ def reset_billing():
 	"""Delete every registry row, checkout, event and removal case, and commit. Webhooks and pushes commit their own work,
 	so the rows outlive a test's rollback."""
 	for doctype in (
+		"Books Bulk Import",
 		"Books Removal Warning",
 		"Books Removal Case",
 		"Books Payment Event",

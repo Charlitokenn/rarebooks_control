@@ -36,6 +36,8 @@ scheduler_events = {
 			"rarebooks_control.registry.queue_pings",
 			"rarebooks_control.onboarding.sweep",
 			"rarebooks_control.pool.sweep",
+			# Spec 0025 AC-9: one refresh job per bulk import still Importing.
+			"rarebooks_control.bulk_import.sweep",
 		],
 	},
 	# Spec 0008 AC-10, AC-16, AC-18: checkout expiry and the ClickPesa reconcile hourly; the PayPal
@@ -49,5 +51,10 @@ scheduler_events = {
 		# Spec 0014 AC-15, AC-16: stale pool sites, then the pool top up.
 		"rarebooks_control.pool.hourly",
 	],
-	"daily": ["rarebooks_control.reconcile.daily", "rarebooks_control.removal_mail.daily"],
+	# Spec 0025 AC-14: bulk import rows are cleared 30 days after they finish.
+	"daily": [
+		"rarebooks_control.reconcile.daily",
+		"rarebooks_control.removal_mail.daily",
+		"rarebooks_control.bulk_import.clear_old_rows",
+	],
 }
