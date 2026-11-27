@@ -18,7 +18,13 @@ frappe.ui.form.on("Books Bulk Import", {
 	},
 
 	onload(frm) {
-		frm.bulk = { types: null, grid: null, warnings: [], poll: null };
+		// `reload_doc` runs `onload` again: stop the old poll first, or its timer is lost and keeps running (AC-9),
+		// and keep the warnings of the Check that reloaded this import, so the grid can mark their cells (AC-5).
+		stop_polling(frm);
+		const checked = frm.checked_warnings;
+		frm.checked_warnings = null;
+		const warnings = checked && checked.name === frm.doc.name ? checked.warnings : [];
+		frm.bulk = { types: null, grid: null, warnings, poll: null };
 	},
 
 	refresh(frm) {
@@ -62,6 +68,8 @@ function set_type_options(frm) {
 			frm.bulk.types = message.types || [];
 			const options = frm.bulk.types.map((kind) => ({ label: __(kind.label), value: kind.doctype }));
 			frm.set_df_property("import_type", "options", options);
+			// Frappe's Autocomplete reads `options` only when it builds its input, so the list needs them too (AC-3).
+			frm.get_field("import_type").set_data(options);
 			if (!frm.doc.columns) {
 				render_grid(frm);
 			}
@@ -128,11 +136,14 @@ function save_first(frm) {
 function run_check(frm) {
 	save_first(frm).then(() =>
 		frappe.call({ method: METHOD + "check", args: { name: frm.doc.name }, freeze: true }).then(({ message }) => {
-			frm.bulk.warnings = message.warnings || [];
+			const warnings = message.warnings || [];
+			frm.bulk.warnings = warnings;
+			// `reload_doc` runs `onload` again, which starts `frm.bulk` afresh; this carries the warnings across.
+			frm.checked_warnings = { name: frm.doc.name, warnings };
 			frm.reload_doc().then(() => {
 				if (message.status === "Checked") {
 					frappe.show_alert({ message: __("Every row passed the check. You can import now."), indicator: "green" });
-				} else if (frm.bulk.warnings.length) {
+				} else if (warnings.length) {
 					frappe.show_alert({ message: __("Fix the marked cells, then check again."), indicator: "orange" });
 				}
 			});
