@@ -1,0 +1,9 @@
+{
+  "tool": "frappe IntegrationTestCase (bench run-tests)",
+  "gate": null,
+  "additionalTools": [],
+  "e2eTool": "playwright (bench run-ui-tests rarebooks_control --headless; data from rarebooks_control/tests/ui_setup.py)",
+  "testDir": "rarebooks_control/tests (Python), playwright/tests (desk UI)",
+  "filePattern": "test_*.py, *.spec.js",
+  "packageManager": "bench"
+}
