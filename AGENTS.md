@@ -30,6 +30,9 @@ bench --site <site> execute rarebooks_control.paypal_check.run
 
 # Test (the site needs allow_tests set to 1)
 bench --site <site> run-tests --app rarebooks_control
+
+# Desk UI tests (Playwright, `playwright/tests/`; the site must be served with `bench start` and allow tests)
+bench --site <site> run-ui-tests rarebooks_control --headless
 ```
 
 There is no build step and no `package.json`; run everything through bench inside a bench folder.

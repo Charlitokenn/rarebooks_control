@@ -15,7 +15,8 @@ The data model of the control site (spec 0008, plus the removal DocTypes from sp
 | `books_removal_settings/` | Single: removal `mode`, pause, approval, the daily drop cap, and `books_bench_group`, the Frappe Cloud bench group that holds the customer sites (spec 0010) |
 | `books_removal_case/` | One removal of one hosted site (spec 0007): status, export, hold, approvals. `books_removal_case.js` adds the Approve, Pause, Resume and Retry buttons |
 | `books_removal_warning/` | Child table of a case: one row per warning email sent |
-| `books_signup/` | One self serve sign up from the marketing site (spec 0014): status Queued, Claiming, Preparing, Ready or Failed, its step, and the claimed `hosted_site`. Unique on `email_key`, `clerk_user_id` and `subdomain`. `books_signup.js` adds Retry on a Failed one for a Billing Manager (`onboarding.retry_signup`, AC-18) |
+| `books_signup/` | One self serve sign up from the marketing site (spec 0014): status Queued, Claiming, Preparing, Ready, Failed or Released, its step, and the claimed `hosted_site`. Unique on `email_key`, `clerk_user_id` and `subdomain`. `books_signup.js` adds Retry on a Failed one for a Billing Manager (`onboarding.retry_signup`, AC-18), and Release sign up with a reason on a Ready or Failed one (`onboarding.release_signup`, spec 0016) |
+| `books_bulk_import/` | One bulk import of grid rows into one hosted site and one document type (spec 0025), Billing Manager only: status Draft, Checked, Importing, Success, Partial Success, Failed or Refused. Status and the server fields change only through `bulk_import._write` (`flags.bulk_import_write`). `books_bulk_import.js` draws the grid with the vendored jspreadsheet in `public/js/vendor/jspreadsheet/` (versions in `VERSIONS.txt`, updated by hand) |
 | `books_onboarding_settings/` | Single: sign up pause, `pool_size`, the daily claim cap, `discard_mode`, the pool build pause, the Frappe Cloud server, plan and domain for new sites, and the hidden `marketing_secret` with `marketing_notify_url` (spec 0014) |
 | `../../tests/data_model.py` | Test helpers: one user per role, `make_site` |
 
@@ -43,6 +44,6 @@ The data model of the control site (spec 0008, plus the removal DocTypes from sp
 
 ## Related specs
 
-Spec 0007 (trial end removal), spec 0008 (billing data model and roles), spec 0010 (Frappe Cloud hosting), spec 0011 (archive call mark), spec 0012 (custom domains), spec 0013 (archived site proof) and spec 0014 (self serve onboarding), kept in the `rarebooks-web` repo.
+Spec 0007 (trial end removal), spec 0008 (billing data model and roles), spec 0010 (Frappe Cloud hosting), spec 0011 (archive call mark), spec 0012 (custom domains), spec 0013 (archived site proof), spec 0014 (self serve onboarding), spec 0016 (release a sign up) and spec 0025 (bulk import), kept in the `rarebooks-web` repo.
 
 _Drafted by /audit from the repo, worth a quick human pass. Edit freely: once a line stops matching this draft, later runs treat it as curated and will flag rather than overwrite it._
