@@ -1,6 +1,7 @@
 """The Frappe Cloud API, the only place the control site talks to it (spec 0010 AC-13, spec 0011).
 
-The methods of `press.api.site`: `get`, `update_config` and `archive` (spec 0010), the seven domain methods
+The methods of `press.api.site`: `get`, `update_config` and `archive` (spec 0010), with
+`press.api.client.get_list` on Site Config read first so `update_config` keeps the other keys, the seven domain methods
 of spec 0012 AC-13 (`domains`, `domain_exists`, `check_dns`, `add_domain`, `retry_add_domain`, `set_host_name`,
 `remove_domain`), and `new` for the warm pool (spec 0014 AC-15), with `press.api.bench.get` and
 `press.api.server.get` read only to fill `new`'s version and cluster. Names and answers were read from the open
@@ -30,6 +31,12 @@ ACTIVE = "Active"
 FORBIDDEN = 403
 # Frappe Cloud's answer to `check_dns` while the domain doesn't point at the site yet.
 DNS_NOT_MATCHED = 417
+# The `type` of a Site Config row in press (empty on an old row, which press then types itself).
+CONFIG_TYPES = (None, "", "String", "Password", "Number", "Boolean", "JSON")
+# The page size for reading Site Config rows: press's own `get_list` default, so no server side cap is smaller.
+CONFIG_PAGE = 20
+# A stop for a read that never ends: far more rows than a site's config holds.
+CONFIG_MAX_ROWS = 2000
 
 
 class FrappeCloudError(Exception):
@@ -61,10 +68,74 @@ def get_site(name: str) -> dict:
 
 
 def update_config(name: str, config: dict):
-	"""Write string keys into the site's `site_config.json`. Frappe Cloud returns the site's config rows; nothing
-	from them is kept, since only a verified `control_ping` proves the write took effect (spec 0010 AC-11)."""
-	rows = [{"key": key, "value": value, "type": "String"} for key, value in config.items()]
+	"""Set string keys in the site's `site_config.json` and keep every other key (spec 0010 AC-11; spec 0011 AC-8).
+
+	`press.api.site.update_config` with a list (the only form the public API takes) goes to
+	`Site._set_configuration`, which replaces the site's whole configuration, keeping only blacklisted and
+	internal keys; only a dict is merged. Confirmed live on 2026-11-27: a 7 key write was refused because press
+	counted every other key as removed. So the site's current rows are read first, `config` is merged over them
+	and the full list is sent. A failed or incomplete read raises `FrappeCloudError` and writes nothing, since
+	writing only `config` would delete every other key. Frappe Cloud answers with the config rows; nothing from
+	them is kept, since only a verified `control_ping` proves the write took effect."""
+	rows = _merged_rows(site_config_rows(name), config)
 	_call("update_config", {"name": name, "config": json.dumps(rows)})
+
+
+def site_config_rows(name: str) -> list[dict]:
+	"""The site's Site Config rows as `{key, value, type}`, read through `press.api.client.get_list`, which
+	needs `parent` and `parenttype` for a child table. A Password row comes back as `*******`. Read in pages of
+	press's default size, ordered by `idx`, until a short page, so a server side limit can't cut the list short
+	unseen. Raises `FrappeCloudError` when a page can't be read or holds something other than config rows; a
+	read changes nothing, so no outcome is unknown (spec 0010 AC-11)."""
+	rows = []
+	while True:
+		try:
+			page = _call(
+				"get_list",
+				{
+					"doctype": "Site Config",
+					"fields": ["key", "type", "value"],
+					"filters": {"parent": name, "parenttype": "Site"},
+					"order_by": "idx asc",
+					"start": len(rows),
+					"limit": CONFIG_PAGE,
+				},
+				module="client",
+			)
+		except OutcomeUnknown:
+			raise FrappeCloudError("press.api.client.get_list sent, no answer") from None
+		if not isinstance(page, list) or not all(_is_config_row(row) for row in page):
+			raise FrappeCloudError("press.api.client.get_list answered without Site Config rows")
+		rows += [{"key": row["key"], "value": row.get("value"), "type": row.get("type")} for row in page]
+		if len(page) < CONFIG_PAGE:
+			return rows
+		if len(rows) >= CONFIG_MAX_ROWS:
+			raise FrappeCloudError("press.api.client.get_list kept answering Site Config rows")
+
+
+def _is_config_row(row) -> bool:
+	return (
+		isinstance(row, dict)
+		and isinstance(row.get("key"), str)
+		and bool(row["key"])
+		and row.get("type") in CONFIG_TYPES
+	)
+
+
+def _merged_rows(rows: list[dict], config: dict) -> list[dict]:
+	"""`rows` with each key of `config` set as a String: in place of the first row with that key (a repeat of it
+	is dropped), else appended. Every other row is sent back as read, with its own type. A Password row goes back
+	as the `*******` mask it was read as, and press keeps the stored value when it sees that mask; a Number,
+	Boolean or JSON row is parsed again from its stored text (spec 0010 AC-11)."""
+	new = {key: {"key": key, "value": value, "type": "String"} for key, value in config.items()}
+	merged = []
+	for row in rows:
+		if row["key"] in config:
+			if row["key"] in new:
+				merged.append(new.pop(row["key"]))
+			continue
+		merged.append(row)
+	return merged + list(new.values())
 
 
 def archive(name: str):
