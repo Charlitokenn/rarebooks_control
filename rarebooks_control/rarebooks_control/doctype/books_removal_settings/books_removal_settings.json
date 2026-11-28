@@ -1,0 +1,115 @@
+{
+ "actions": [],
+ "creation": "2026-11-20 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "mode",
+  "removal_paused",
+  "require_approval",
+  "max_drops_per_day",
+  "column_break_settings",
+  "books_bench_group",
+  "last_run_on"
+ ],
+ "fields": [
+  {
+   "default": "off",
+   "description": "off: nothing runs. dry_run: exports are built and emails go to books_ops_email, nothing is archived. live: real warnings and drops.",
+   "fieldname": "mode",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Mode",
+   "options": "off\ndry_run\nlive",
+   "reqd": 1
+  },
+  {
+   "default": "0",
+   "description": "Stops every new export and drop at once.",
+   "fieldname": "removal_paused",
+   "fieldtype": "Check",
+   "label": "Removal Paused"
+  },
+  {
+   "default": "1",
+   "fieldname": "require_approval",
+   "fieldtype": "Check",
+   "label": "Require Approval"
+  },
+  {
+   "default": "5",
+   "fieldname": "max_drops_per_day",
+   "fieldtype": "Int",
+   "label": "Max Drops Per Day",
+   "non_negative": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_settings",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "The Frappe Cloud bench group whose sites may be registered and archived.",
+   "fieldname": "books_bench_group",
+   "fieldtype": "Data",
+   "label": "Books Bench Group",
+   "mandatory_depends_on": "eval:doc.mode !== 'off'"
+  },
+  {
+   "description": "UTC.",
+   "fieldname": "last_run_on",
+   "fieldtype": "Datetime",
+   "label": "Last Run On",
+   "read_only": 1
+  }
+ ],
+ "grid_page_length": 50,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-11-20 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Rarebooks Control",
+ "name": "Books Removal Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "amend": 0,
+   "cancel": 0,
+   "create": 0,
+   "delete": 0,
+   "email": 0,
+   "export": 0,
+   "import": 0,
+   "permlevel": 0,
+   "print": 0,
+   "read": 1,
+   "report": 0,
+   "role": "Removal Manager",
+   "share": 0,
+   "submit": 0,
+   "write": 1
+  },
+  {
+   "amend": 0,
+   "cancel": 0,
+   "create": 0,
+   "delete": 0,
+   "email": 0,
+   "export": 0,
+   "import": 0,
+   "permlevel": 0,
+   "print": 0,
+   "read": 1,
+   "report": 0,
+   "role": "System Manager",
+   "share": 0,
+   "submit": 0,
+   "write": 0
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

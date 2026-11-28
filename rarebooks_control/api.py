@@ -1,0 +1,239 @@
+"""Signed endpoints for customer sites (spec 0008 AC-2 to AC-5). Sites are registered from desk through the
+Frappe Cloud API (`registry.py`, spec 0010 AC-10), no longer by a signed call.
+
+Each one reads the raw body, checks the signature and `issued_at` first, and answers through
+`signing.signed_response`, never `frappe.throw` or Frappe's `{"message": ...}` wrapper.
+"""
+
+import hashlib
+import secrets
+from datetime import timedelta
+from decimal import ROUND_HALF_UP, Decimal
+from urllib.parse import urlsplit
+
+import frappe
+from frappe.utils import getdate, now_datetime
+from werkzeug.wrappers import Response
+
+from rarebooks_control import billing, removal, signing
+from rarebooks_control.providers import cloudflare, paypal
+from rarebooks_control.providers.clickpesa import ClickPesaError
+from rarebooks_control.providers.paypal import PayPalError
+from rarebooks_control.rarebooks_control.doctype.books_plan.books_plan import CURRENCY_STEP
+from rarebooks_control.state import site_state
+
+SITE = "Books Hosted Site"
+CHECKOUT = "Books Checkout"
+PROVIDERS = ("ClickPesa", "PayPal")
+BILLING_PERIODS = ("Monthly", "Yearly")
+FACTS = ("trial_ends_on", "time_zone", "language", "company_name")
+FACT_LENGTH = 140
+REUSE_WINDOW = timedelta(hours=24)
+GET_STATE_LIMIT, CHECKOUT_LIMIT = 30, 10
+CONFLICT, BAD_REQUEST, TOO_MANY, PROVIDER_FAILED = 409, 400, 429, 502
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def get_state() -> Response:
+	"""The site's state with an echo of its `issued_at`, and the plans it is offered (AC-2)."""
+	verified = _verify_site("get_state", GET_STATE_LIMIT)
+	if not isinstance(verified, tuple):
+		return verified
+	request, row = verified
+	if row.config_status != "Active" or row.pool_status in ("Building", "Ready"):
+		# Spec 0011 AC-5, spec 0014 AC-20 (a pool site no sign up has claimed gets no state): setup isn't finished, which is no signature failure. Signed with the verifying secret.
+		return request.answer({"refusal": "config_pending"}, CONFLICT)
+	_store_facts(row, request.body)
+	state = {**site_state(row), "issued_at": request.issued_at}
+	return request.answer({"state": state, "plans": offered_plans(row)})
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def create_checkout() -> Response:
+	"""A `go` link to the provider's checkout for the site's chosen plan (AC-3, AC-5)."""
+	verified = _verify_site("create_checkout", CHECKOUT_LIMIT)
+	if not isinstance(verified, tuple):
+		return verified
+	request, row = verified
+	body = request.body
+	provider, period, return_url = body.get("provider"), body.get("billing_period"), body.get("return_url")
+	if provider not in PROVIDERS or period not in BILLING_PERIODS or not _is_return_url(return_url, row):
+		return request.answer({}, BAD_REQUEST)
+
+	row = frappe.get_doc(SITE, row.name, for_update=True)
+	_store_facts(row, body)
+	# Spec 0007 AC-11: no payment starts while a drop can start.
+	if removal.is_being_removed(row.name):
+		return request.answer({"refusal": "being_removed"}, CONFLICT)
+	plan = plan_for(row, provider, period)
+	if not plan:
+		return request.answer({"refusal": "plan_not_offered"}, CONFLICT)
+	try:
+		subscribed = _has_live_subscription(row)
+	except PayPalError as error:
+		frappe.db.rollback()
+		frappe.log_error("Billing: create_checkout could not ask PayPal about the subscription", str(error))
+		return request.answer({}, PROVIDER_FAILED)
+	if subscribed:
+		return request.answer({"refusal": "already_subscribed"}, CONFLICT)
+
+	token = secrets.token_urlsafe(32)
+	reused = _reusable_checkout(row.name, plan)
+	if reused:
+		# Overwrites the hash, so the older `go` link stops working; `modified` dates the new token.
+		frappe.db.set_value(CHECKOUT, reused, "token_hash", token_hash(token))
+	else:
+		try:
+			billing.new_checkout(row, plan, return_url, token_hash(token))
+		except (ClickPesaError, PayPalError) as error:
+			frappe.db.rollback()
+			frappe.log_error("Billing: create_checkout could not reach the provider", str(error))
+			return request.answer({}, PROVIDER_FAILED)
+	return request.answer({"checkout_url": billing.go_url(token)})
+
+
+def _has_live_subscription(row) -> bool:
+	"""The site's current PayPal subscription is `ACTIVE` or `APPROVED` at PayPal, read live (AC-5).
+	Refused for either provider, so a PayPal subscriber can't also pay a ClickPesa year by mistake."""
+	if row.provider != "PayPal" or not row.provider_reference:
+		return False
+	subscription = paypal.get_subscription(row.provider_reference)
+	return bool(subscription) and subscription.get("status") in paypal.LIVE_STATUSES
+
+
+def offered_plans(row) -> list[dict]:
+	"""Every enabled plan; a test plan only for a site that allows them, and there it replaces the real one."""
+	plans = {}
+	for plan in _enabled_plans():
+		if plan.test_only and not row.allow_test_plans:
+			continue
+		key = (plan.provider, plan.billing_period)
+		if plan.test_only or key not in plans:
+			plans[key] = plan
+	return [
+		{
+			"provider": plan.provider,
+			"billing_period": plan.billing_period,
+			"amount": json_amount(plan.amount, plan.currency),
+			"currency": plan.currency,
+			"label": plan.label,
+		}
+		for plan in plans.values()
+	]
+
+
+def json_amount(amount, currency: str) -> int | float:
+	"""The plan amount as a JSON number, from the Decimal rounded to the currency's unit: the customer site
+	formats it as a number. Whole TZS stay integers; USD keeps its two decimals exactly."""
+	value = Decimal(str(amount)).quantize(CURRENCY_STEP[currency], rounding=ROUND_HALF_UP)
+	return int(value) if value == value.to_integral_value() else float(value)
+
+
+def plan_for(row, provider: str, period: str):
+	"""The plan a checkout uses: the test plan when the site allows one for that pair, else the real one."""
+	matches = [
+		plan
+		for plan in _enabled_plans()
+		if (plan.provider, plan.billing_period) == (provider, period)
+		and (row.allow_test_plans or not plan.test_only)
+	]
+	test_plans = [plan for plan in matches if plan.test_only]
+	return (test_plans or matches or [None])[0]
+
+
+def token_hash(token: str) -> str:
+	return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _enabled_plans() -> list:
+	return frappe.get_all(
+		"Books Plan",
+		filters={"enabled": 1},
+		fields=["name", "provider", "billing_period", "amount", "currency", "label", "test_only"],
+		order_by="test_only asc, name asc",
+	)
+
+
+def _verify_site(endpoint: str, limit: int):
+	"""The verified request and its row, or the 401 or 429 answer to send. Unknown and Removed sites get 401."""
+	raw, body = signing.read_body()
+	site = body.get("site") if body else None
+	row = frappe.get_doc(SITE, site) if isinstance(site, str) and frappe.db.exists(SITE, site) else None
+	if not row or row.status == "Removed":
+		return signing.unauthorized()
+	request = signing.verify_request(raw, body, signing.site_secrets(row))
+	if not request:
+		return signing.unauthorized(row.get_password("control_secret", raise_exception=False))
+	if signing.over_limit(endpoint, row.name, limit):
+		return request.answer({}, TOO_MANY)
+	return request, row
+
+
+def _store_facts(row, body: dict):
+	"""The site facts of a signed call, kept for dates and emails (AC-2, AC-3). Not billing, so no Version."""
+	values = {
+		"trial_ends_on": _date_or_none(body.get("trial_ends_on")),
+		"time_zone": _text_or_none(body.get("time_zone")),
+		"language": _text_or_none(body.get("language")),
+		"company_name": _text_or_none(body.get("company_name")),
+	}
+	stored = {
+		"trial_ends_on": getdate(row.trial_ends_on) if row.trial_ends_on else None,
+		**{field: row.get(field) or None for field in FACTS[1:]},
+	}
+	if values != stored:
+		frappe.db.set_value(SITE, row.name, values, update_modified=False)
+		row.update(values)
+
+
+def _reusable_checkout(site: str, plan) -> str | None:
+	"""An unpaid `Created` checkout for the same site and plan made in the last 24 hours (AC-3)."""
+	return frappe.db.get_value(
+		CHECKOUT,
+		{
+			"site": site,
+			"plan": plan.name,
+			"amount": plan.amount,
+			"currency": plan.currency,
+			"provider_url": ("is", "set"),
+			"status": "Created",
+			"creation": (">", now_datetime() - REUSE_WINDOW),
+		},
+		"name",
+		order_by="creation desc",
+	)
+
+
+def _is_https(value) -> bool:
+	try:
+		return isinstance(value, str) and value.startswith("https://") and bool(urlsplit(value).hostname)
+	except ValueError:
+		return False
+
+
+def _is_return_url(value, row) -> bool:
+	"""`https://` on one of the site's own hosts, all from the registry, so the return can't be an open redirect
+	(AC-5): the host of `site_url`, its `.frappe.cloud` name, and its subdomain address. A checkout started on
+	either address, before or after the switch, comes back (spec 0012 AC-9)."""
+	if not _is_https(value):
+		return False
+	hosts = {row.site.lower()}
+	if _is_https(row.site_url):
+		hosts.add(urlsplit(row.site_url).hostname)
+	domain = cloudflare.site_domain()
+	if row.subdomain and domain:
+		hosts.add(f"{row.subdomain}.{domain}")
+	return urlsplit(value).hostname in hosts
+
+
+def _date_or_none(value):
+	if not isinstance(value, str) or not value:
+		return None
+	try:
+		return getdate(value)
+	except Exception:
+		return None
+
+
+def _text_or_none(value) -> str | None:
+	return value[:FACT_LENGTH] if isinstance(value, str) and value else None

@@ -1,0 +1,244 @@
+{
+ "actions": [],
+ "autoname": "BIMP-.#####",
+ "creation": "2026-11-26 12:00:00",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "hosted_site",
+  "import_type",
+  "submit_after_import",
+  "column_break_type",
+  "status",
+  "row_count",
+  "success_count",
+  "failed_count",
+  "last_error",
+  "section_break_grid",
+  "grid_html",
+  "section_break_history",
+  "attempt",
+  "site_import",
+  "columns_fetched_on",
+  "checked_on",
+  "column_break_history",
+  "sent_on",
+  "finished_on",
+  "last_progress_on",
+  "rows_cleared_on",
+  "section_break_data",
+  "columns",
+  "rows",
+  "results",
+  "checked_hash",
+  "sending_since",
+  "site_processed"
+ ],
+ "fields": [
+  {
+   "fieldname": "hosted_site",
+   "fieldtype": "Link",
+   "label": "Hosted Site",
+   "options": "Books Hosted Site",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "import_type",
+   "fieldtype": "Autocomplete",
+   "label": "Document Type",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "Picked from the types the site imports"
+  },
+  {
+   "fieldname": "submit_after_import",
+   "fieldtype": "Check",
+   "label": "Submit After Import",
+   "default": "0",
+   "description": "Leave off to import drafts. Expenses are always imported as drafts."
+  },
+  {
+   "fieldname": "column_break_type",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Draft\nChecked\nImporting\nSuccess\nPartial Success\nFailed\nRefused",
+   "default": "Draft",
+   "reqd": 1,
+   "read_only": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "row_count",
+   "fieldtype": "Int",
+   "label": "Rows",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "success_count",
+   "fieldtype": "Int",
+   "label": "Saved Rows",
+   "read_only": 1
+  },
+  {
+   "fieldname": "failed_count",
+   "fieldtype": "Int",
+   "label": "Failed Rows",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_error",
+   "fieldtype": "Small Text",
+   "label": "Last Error",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_grid",
+   "fieldtype": "Section Break",
+   "label": "Rows"
+  },
+  {
+   "fieldname": "grid_html",
+   "fieldtype": "HTML",
+   "label": "Grid"
+  },
+  {
+   "fieldname": "section_break_history",
+   "fieldtype": "Section Break",
+   "label": "History",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "attempt",
+   "fieldtype": "Int",
+   "label": "Attempt",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "site_import",
+   "fieldtype": "Data",
+   "label": "Site Import",
+   "read_only": 1,
+   "description": "The Data Import on the site, named after this import and its attempt"
+  },
+  {
+   "fieldname": "columns_fetched_on",
+   "fieldtype": "Datetime",
+   "label": "Columns Fetched On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "checked_on",
+   "fieldtype": "Datetime",
+   "label": "Checked On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_history",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "sent_on",
+   "fieldtype": "Datetime",
+   "label": "Sent On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "finished_on",
+   "fieldtype": "Datetime",
+   "label": "Finished On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_progress_on",
+   "fieldtype": "Datetime",
+   "label": "Last Progress On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "rows_cleared_on",
+   "fieldtype": "Datetime",
+   "label": "Rows Cleared On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_data",
+   "fieldtype": "Section Break",
+   "hidden": 1
+  },
+  {
+   "fieldname": "columns",
+   "fieldtype": "Long Text",
+   "label": "Columns",
+   "hidden": 1
+  },
+  {
+   "fieldname": "rows",
+   "fieldtype": "Long Text",
+   "label": "Rows Data",
+   "hidden": 1
+  },
+  {
+   "fieldname": "results",
+   "fieldtype": "Long Text",
+   "label": "Results",
+   "hidden": 1
+  },
+  {
+   "fieldname": "checked_hash",
+   "fieldtype": "Data",
+   "label": "Checked Hash",
+   "hidden": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "sending_since",
+   "fieldtype": "Datetime",
+   "label": "Sending Since",
+   "hidden": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "site_processed",
+   "fieldtype": "Int",
+   "label": "Site Processed",
+   "hidden": 1,
+   "read_only": 1,
+   "default": "0"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-11-26 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Rarebooks Control",
+ "name": "Books Bulk Import",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Billing Manager",
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "hosted_site",
+ "track_changes": 0
+}

@@ -21,3 +21,8 @@ venv/
 *.DS_Store
 *.swp
 *debug.log
+dump.rdb
+
+# Playwright UI test output (bench run-ui-tests)
+test-results/
+playwright-report/

@@ -1,0 +1,3 @@
+Vendored for the Books Bulk Import form (spec 0025). Update by hand.
+jspreadsheet-ce 5.0.4 (MIT) dist/index.js, dist/jspreadsheet.css
+jsuites 5.13.5 (MIT) dist/jsuites.js, dist/jsuites.css

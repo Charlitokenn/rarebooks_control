@@ -9,6 +9,9 @@ readme = "README.md"
 dynamic = ["version"]
 dependencies = [
     # Frappe version-16 is installed and managed by bench. `requests` comes with it.
+    # Presigned upload and download links and the HEAD check for the export bucket on Cloudflare R2
+    # (specs 0007, 0010). The control site is the only holder of an R2 token.
+    "boto3>=1.35,<2",
 ]
 
 [build-system]
